@@ -18,3 +18,7 @@ export async function login(body: { email: string; password: string }): Promise<
   const { data } = await apiClient.post<TokenResponse>("/auth/login", body);
   return data;
 }
+
+export async function logout(): Promise<void> {
+  await apiClient.post("/auth/logout");
+}

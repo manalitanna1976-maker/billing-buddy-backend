@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 
+import { logout } from "../api/auth";
 import { getBusiness } from "../api/business";
 import AppShell from "../components/AppShell";
 import { useAuthStore } from "../store/authStore";
@@ -23,9 +24,19 @@ export default function UserProfilePage() {
   const setToken = useAuthStore((s) => s.setToken);
   const { data: business } = useQuery({ queryKey: ["business"], queryFn: getBusiness });
 
-  function handleLogout() {
-    setToken(null);
-    navigate("/login");
+  async function handleLogout() {
+    try {
+      // Revoke the token server-side (see backend app/token_revocation.py)
+      // so it can't be replayed if it leaked, not just forgotten locally.
+      await logout();
+    } catch {
+      // Best-effort: if the call fails (offline, token already expired,
+      // etc.), still clear local state so the user isn't stuck logged in
+      // on this device.
+    } finally {
+      setToken(null);
+      navigate("/login");
+    }
   }
 
   return (

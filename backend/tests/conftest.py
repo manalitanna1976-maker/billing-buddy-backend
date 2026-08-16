@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.db import Base, engine, SessionLocal
-from app import rate_limit
+from app import rate_limit, token_revocation
 
 
 @pytest.fixture
@@ -31,6 +31,16 @@ def _reset_rate_limiter():
     rate_limit.reset_all_state()
     yield
     rate_limit.reset_all_state()
+
+
+@pytest.fixture(autouse=True)
+def _reset_token_revocation():
+    # Same reasoning as _reset_rate_limiter: app/token_revocation.py's store
+    # is module-level in-memory state, and would otherwise leak a logged-out
+    # token's revocation across tests.
+    token_revocation.reset_all_state()
+    yield
+    token_revocation.reset_all_state()
 
 
 @pytest.fixture

@@ -40,7 +40,6 @@ class User(Base):
     business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("businesses.id"), index=True)
     email: Mapped[str] = mapped_column(String(200), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(200))
-    role: Mapped[str] = mapped_column(String(20), default="owner")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
