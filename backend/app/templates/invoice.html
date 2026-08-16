@@ -1,0 +1,89 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font-family: sans-serif; font-size: 11px; color: #1a1a1a; }
+  h1 { font-size: 16px; margin-bottom: 4px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+  th, td { border: 1px solid #ccc; padding: 4px 6px; text-align: left; }
+  .totals { margin-top: 12px; width: 40%; margin-left: auto; }
+  .totals td { border: none; padding: 2px 6px; }
+  .grand-total { font-weight: bold; background: #fef9c3; }
+  .header-row { display: flex; justify-content: space-between; }
+  .logo { max-height: 60px; }
+  .signature { max-height: 50px; margin-top: 20px; }
+  .logo-fallback { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+  .logo-fallback-label { font-weight: bold; font-size: 13px; color: #15803d; }
+</style>
+</head>
+<body>
+  <div class="header-row">
+    <div>
+      {% if business.logo_url %}
+      <img class="logo" src="{{ logo_path }}">
+      {% else %}
+      <div class="logo-fallback">
+        <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36" role="img" aria-label="Billing Buddy">
+          <rect width="36" height="36" rx="7" fill="#15803d"/>
+          <text x="18" y="24" font-family="sans-serif" font-size="15" font-weight="bold" fill="#ffffff" text-anchor="middle">BB</text>
+        </svg>
+        <span class="logo-fallback-label">Billing Buddy</span>
+      </div>
+      {% endif %}
+      <h1>{{ business.name }}</h1>
+      <div>{{ business.address or "" }}</div>
+      <div>GSTIN: {{ business.gstin or "-" }}</div>
+    </div>
+    <div>
+      <div><strong>Invoice No:</strong> {{ invoice.invoice_no }}</div>
+      <div><strong>Date:</strong> {{ invoice.invoice_date }}</div>
+      {% if invoice.due_date %}<div><strong>Due Date:</strong> {{ invoice.due_date }}</div>{% endif %}
+    </div>
+  </div>
+
+  <h2>Bill To</h2>
+  <div>{{ customer.name }}</div>
+  <div>{{ customer.address or "" }}</div>
+  <div>GSTIN: {{ customer.gstin or "-" }} &middot; PAN: {{ customer.pan or "-" }}</div>
+  <div>Place of Supply: {{ customer.place_of_supply or "-" }}</div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Sr</th><th>Product</th><th>HSN/SAC</th><th>Qty</th><th>UOM</th>
+        <th>Price</th><th>Discount</th><th>GST %</th><th>Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in line_items %}
+      <tr>
+        <td>{{ item.sr_no }}</td>
+        <td>{{ item.product_name }}</td>
+        <td>{{ item.hsn_sac or "" }}</td>
+        <td>{{ item.qty }}</td>
+        <td>{{ item.uom or "" }}</td>
+        <td>{{ item.price }}</td>
+        <td>{{ item.discount }}</td>
+        <td>{{ item.gst_rate }}</td>
+        <td>{{ item.line_total }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <table class="totals">
+    <tr><td>Taxable Total</td><td>{{ invoice.taxable_total }}</td></tr>
+    <tr><td>Total Tax</td><td>{{ invoice.tax_total }}</td></tr>
+    <tr class="grand-total"><td>Grand Total</td><td>{{ invoice.grand_total }}</td></tr>
+  </table>
+  <div>Amount in words: {{ amount_in_words }}</div>
+
+  {% if business.signature_url %}
+  <div>
+    <img class="signature" src="{{ signature_path }}">
+    <div>Authorized Signatory</div>
+  </div>
+  {% endif %}
+</body>
+</html>

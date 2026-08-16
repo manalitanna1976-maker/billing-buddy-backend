@@ -1,0 +1,75 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-bg: #f7f6f2;
+  --color-surface: #ffffff;
+  --color-border: #e4e1d8;
+  --color-ink: #1b2422;
+  --color-ink-muted: #667572;
+  --color-primary: #0b6e5c;
+  --color-primary-fg: #ffffff;
+  --color-gold: #b8863e;
+  --color-gold-fg: #2a1d08;
+  --color-highlight: #fbf3dc;
+  --color-success: #1e8e5a;
+  --color-warning: #b07a12;
+  --color-danger: #b3261e;
+  --color-online: #5b5bd6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #14181a;
+    --color-surface: #1d2224;
+    --color-border: #2c3436;
+    --color-ink: #e8ede9;
+    --color-ink-muted: #9aaba6;
+    --color-primary: #3fb495;
+    --color-primary-fg: #08211b;
+    --color-gold: #d9a959;
+    --color-gold-fg: #2a1d08;
+    --color-highlight: rgba(217, 169, 89, 0.16);
+    --color-success: #34b374;
+    --color-warning: #d9a530;
+    --color-danger: #e0574d;
+    --color-online: #8a8af0;
+  }
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-ink);
+  font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+.font-ledger {
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+input,
+select,
+textarea {
+  background-color: var(--color-surface);
+  color: var(--color-ink);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-ink-muted);
+}
