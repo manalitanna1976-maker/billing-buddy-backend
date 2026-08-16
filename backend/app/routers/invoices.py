@@ -1,3 +1,4 @@
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -12,6 +13,26 @@ from app.services.numbering import next_invoice_number
 from app.services.pdf import render_invoice_pdf
 
 router = APIRouter(prefix="/invoices", tags=["invoices"])
+
+_HEADER_CONTROL_CHARS = re.compile(r'[\r\n\x00-\x1f\x7f]')
+
+
+def _safe_pdf_filename(invoice_no: str) -> str:
+    """Sanitize invoice_no for embedding in a Content-Disposition header.
+
+    invoice_no is `{business.invoice_prefix}{seq}{business.invoice_postfix}`
+    (see app/services/numbering.py) and business.invoice_prefix/postfix are
+    free-text fields a business owner can set to arbitrary strings via
+    PUT /business — including quotes and CR/LF. Interpolating that
+    unescaped directly into the header value let a crafted prefix break
+    the header's quoted-string syntax, or — with an embedded \\r\\n —
+    made uvicorn raise "Invalid HTTP header value" and drop the
+    connection on every subsequent PDF download for that invoice. Strip
+    control characters and escape backslashes/quotes for a valid
+    RFC 6266 quoted-string.
+    """
+    stripped = _HEADER_CONTROL_CHARS.sub("", invoice_no)
+    return stripped.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _get_owned_or_404(db: Session, business: Business, invoice_id: uuid.UUID) -> Invoice:
@@ -166,8 +187,9 @@ def download_invoice_pdf(
 ):
     invoice = _get_owned_or_404(db, business, invoice_id)
     pdf_bytes = render_invoice_pdf(invoice)
+    safe_filename = _safe_pdf_filename(invoice.invoice_no)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{invoice.invoice_no}.pdf"'},
+        headers={"Content-Disposition": f'attachment; filename="{safe_filename}.pdf"'},
     )

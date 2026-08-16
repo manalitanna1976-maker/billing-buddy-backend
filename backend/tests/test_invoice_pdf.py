@@ -12,6 +12,41 @@ def _setup(client, email="owner@pdf.test"):
     return headers, customer.json()["id"]
 
 
+def test_download_invoice_pdf_sanitizes_crlf_and_quotes_in_filename(client):
+    # invoice_no is `{invoice_prefix}{seq}{invoice_postfix}`, and both
+    # prefix/postfix are free-text fields a business owner can set via
+    # PUT /business with no character restrictions. Embedding invoice_no
+    # unescaped in the Content-Disposition header let a crafted prefix
+    # break the header's quoted-string syntax, and a CR/LF-laced prefix
+    # made uvicorn raise "Invalid HTTP header value" and drop the
+    # connection entirely — a self-inflicted DoS on that invoice's PDF
+    # download. The endpoint must sanitize invoice_no before using it.
+    headers, customer_id = _setup(client)
+    client.put(
+        "/business", headers=headers, json={"invoice_prefix": 'A"\r\nX-Inj: 1\r\n'}
+    )
+    create_resp = client.post(
+        "/invoices",
+        headers=headers,
+        json={
+            "customer_id": customer_id,
+            "invoice_date": "2026-08-16",
+            "line_items": [{"product_name": "Steel Rod", "qty": "1", "price": "100", "gst_rate": "0"}],
+        },
+    )
+    invoice_id = create_resp.json()["id"]
+
+    resp = client.get(f"/invoices/{invoice_id}/pdf", headers=headers)
+    assert resp.status_code == 200
+    assert resp.content[:4] == b"%PDF"
+    disposition = resp.headers["content-disposition"]
+    assert "\r" not in disposition
+    assert "\n" not in disposition
+    # The literal quote must be backslash-escaped, not left to terminate
+    # the quoted-string early.
+    assert '\\"' in disposition
+
+
 def test_download_invoice_pdf(client):
     headers, customer_id = _setup(client)
     create_resp = client.post(
