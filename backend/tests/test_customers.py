@@ -51,3 +51,12 @@ def test_customer_create_persists_gstin_and_pan_separately(client):
     assert body["gstin"] == "24AAAAA0000A1Z5"
     assert body["pan"] == "AAAAA0000A"
     assert "gstin_pan" not in body
+
+
+def test_list_customers_rejects_negative_limit_and_offset(client):
+    headers = _headers(client, "paging@cust.test")
+    client.post("/customers", headers=headers, json={"name": "Acme Traders"})
+
+    assert client.get("/customers", headers=headers, params={"limit": -5}).status_code == 422
+    assert client.get("/customers", headers=headers, params={"offset": -1}).status_code == 422
+    assert client.get("/customers", headers=headers, params={"limit": 0}).status_code == 422
