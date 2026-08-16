@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from weasyprint import HTML
 
 from app.config import get_settings
@@ -8,7 +8,14 @@ from app.models import Invoice
 from app.services.num2words_inr import amount_in_words
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
-_env = Environment(loader=FileSystemLoader(TEMPLATES_DIR))
+# Autoescape HTML: invoice fields (customer name/address, product names, ...)
+# are tenant-controlled free text rendered straight into this template. Without
+# escaping, a crafted field can inject markup WeasyPrint will fetch server-side
+# (e.g. <img src="http://internal-host/...">) -- an SSRF/HTML-injection vector.
+_env = Environment(
+    loader=FileSystemLoader(TEMPLATES_DIR),
+    autoescape=select_autoescape(["html"]),
+)
 
 
 def _local_file_url(upload_dir_root: Path, served_path: str | None) -> str | None:
