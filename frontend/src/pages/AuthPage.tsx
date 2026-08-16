@@ -1,4 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
+import { isAxiosError } from "axios";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -40,6 +41,20 @@ function TabButton({
       {children}
     </button>
   );
+}
+
+// The backend rate-limits repeated failed logins (per email and per IP —
+// see backend/app/rate_limit.py) and returns 429 with a specific `detail`
+// once the caller is locked out. Surface that distinctly from a plain
+// wrong-password 401 so the user knows to wait rather than re-guessing.
+function loginErrorMessage(error: unknown): string {
+  if (isAxiosError(error) && error.response?.status === 429) {
+    return (
+      (error.response.data as { detail?: string } | undefined)?.detail ??
+      "Too many login attempts. Please wait a few minutes and try again."
+    );
+  }
+  return "Invalid email or password.";
 }
 
 export default function AuthPage() {
@@ -131,7 +146,7 @@ export default function AuthPage() {
                 />
               </div>
               {loginMutation.isError && (
-                <p className="text-sm text-danger">Invalid email or password.</p>
+                <p className="text-sm text-danger">{loginErrorMessage(loginMutation.error)}</p>
               )}
               <button
                 type="submit"
