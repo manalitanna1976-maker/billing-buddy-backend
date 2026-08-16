@@ -27,7 +27,13 @@ def _get_owned_or_404(db: Session, business: Business, invoice_id: uuid.UUID) ->
 
 
 def _apply_totals_and_items(invoice: Invoice, body: InvoiceCreate, business: Business, customer: Customer):
-    same_state = bool(business.state) and business.state == customer.place_of_supply
+    # Both `Business.state` and `Customer.place_of_supply` are free-text
+    # fields (no fixed dropdown of Indian states), so compare case/whitespace
+    # insensitively — "Gujarat" vs "gujarat" is the same state for GST
+    # purposes and must produce CGST+SGST, not silently fall through to IGST.
+    same_state = bool(business.state) and bool(customer.place_of_supply) and (
+        business.state.strip().casefold() == customer.place_of_supply.strip().casefold()
+    )
     calc_items = [
         LineItemInput(qty=li.qty, price=li.price, discount=li.discount, gst_rate=li.gst_rate)
         for li in body.line_items

@@ -49,8 +49,13 @@ export function computeInvoiceTotalsPreview(
 
   const taxableTotal = round2(subtotal - discountAmount);
 
+  // Backend rounds each line's tax to 2dp (via split_gst's per-line CGST/SGST or
+  // IGST quantization) before summing, so the total is a sum of already-rounded
+  // paise amounts. Rounding only once at the end (on the raw float sum) drifts
+  // from that by up to a paisa per extra line item — round each line first to
+  // match backend/app/services/gst.py exactly.
   const taxTotal = round2(
-    items.reduce((sum, item, i) => sum + (lineTaxables[i] * n(item.gst_rate)) / 100, 0),
+    items.reduce((sum, item, i) => sum + round2((lineTaxables[i] * n(item.gst_rate)) / 100), 0),
   );
 
   const tcsAmount = round2(n(tcs));
