@@ -6,6 +6,7 @@ import {
   createBankAccount,
   deleteBankAccount,
   listBankAccounts,
+  updateBankAccount,
 } from "../api/bankAccounts";
 import AppShell from "../components/AppShell";
 import {
@@ -14,6 +15,7 @@ import {
   dangerLinkClass,
   inputClass,
   labelClass,
+  linkClass,
   primaryButtonClass,
 } from "../styles";
 
@@ -45,6 +47,11 @@ export default function BankAccountsPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["bank-accounts"] }),
   });
 
+  const setDefaultMutation = useMutation({
+    mutationFn: (id: string) => updateBankAccount(id, { is_default: true }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["bank-accounts"] }),
+  });
+
   return (
     <AppShell title="Bank Accounts">
       <div className="space-y-6">
@@ -72,10 +79,19 @@ export default function BankAccountsPage() {
                     <td className="py-2 tabular-nums">{maskAccountNo(a.account_no)}</td>
                     <td className="py-2 tabular-nums">{a.ifsc}</td>
                     <td className="py-2">
-                      {a.is_default && (
+                      {a.is_default ? (
                         <span className="rounded-full bg-highlight px-2 py-0.5 text-xs font-medium text-gold">
                           Default
                         </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setDefaultMutation.mutate(a.id)}
+                          disabled={setDefaultMutation.isPending}
+                          className={linkClass}
+                        >
+                          Set default
+                        </button>
                       )}
                     </td>
                     <td className="py-2 text-right">
