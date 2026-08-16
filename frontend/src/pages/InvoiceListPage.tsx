@@ -1,11 +1,17 @@
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { listCustomers } from "../api/customers";
-import { InvoiceListItem, downloadInvoicePdf, getInvoice, listInvoices } from "../api/invoices";
+import {
+  InvoiceListItem,
+  cancelInvoice,
+  downloadInvoicePdf,
+  getInvoice,
+  listInvoices,
+} from "../api/invoices";
 import AppShell from "../components/AppShell";
-import { cardClass, inputClass, linkClass, primaryButtonClass } from "../styles";
+import { cardClass, dangerLinkClass, inputClass, linkClass, primaryButtonClass } from "../styles";
 
 function StatusBadge({ status }: { status: string }) {
   const styles: Record<string, string> = {
@@ -33,11 +39,26 @@ function moneyFmt(value: string | number): string {
 export default function InvoiceListPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const queryClient = useQueryClient();
 
   const { data: invoices = [], isLoading } = useQuery({
     queryKey: ["invoices"],
     queryFn: listInvoices,
   });
+
+  const cancelMutation = useMutation({
+    mutationFn: cancelInvoice,
+    onSuccess: (invoice) => {
+      queryClient.invalidateQueries({ queryKey: ["invoices"] });
+      queryClient.setQueryData(["invoice", invoice.id], invoice);
+    },
+  });
+
+  function handleCancel(id: string, invoiceNo: string) {
+    if (window.confirm(`Cancel invoice ${invoiceNo}? This cannot be undone.`)) {
+      cancelMutation.mutate(id);
+    }
+  }
   const { data: customers = [] } = useQuery({ queryKey: ["customers", "list"], queryFn: listCustomers });
   const customerNameById = useMemo(() => {
     const map = new Map(customers.map((c) => [c.id, c.name]));
@@ -134,13 +155,25 @@ export default function InvoiceListPage() {
                       <StatusBadge status={inv.status} />
                     </td>
                     <td className="py-2 text-right">
-                      <button
-                        type="button"
-                        onClick={() => handleDownload(inv.id, inv.invoice_no)}
-                        className={linkClass}
-                      >
-                        Download PDF
-                      </button>
+                      <div className="flex items-center justify-end gap-3">
+                        <button
+                          type="button"
+                          onClick={() => handleDownload(inv.id, inv.invoice_no)}
+                          className={linkClass}
+                        >
+                          Download PDF
+                        </button>
+                        {inv.status !== "cancelled" && (
+                          <button
+                            type="button"
+                            onClick={() => handleCancel(inv.id, inv.invoice_no)}
+                            disabled={cancelMutation.isPending}
+                            className={dangerLinkClass + " disabled:opacity-50"}
+                          >
+                            Cancel
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}

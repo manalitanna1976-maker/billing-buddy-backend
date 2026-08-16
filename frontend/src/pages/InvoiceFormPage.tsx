@@ -218,7 +218,11 @@ export default function InvoiceFormPage() {
           uom: li.uom,
           price: String(li.price),
           discount: String(li.discount),
-          gst_rate: String(li.gst_rate),
+          // The API returns gst_rate as a Decimal-formatted string (e.g. "18.00"),
+          // which doesn't match any <option value="18"> in the GST % <select> —
+          // that left the dropdown showing blank/unselected on every saved
+          // invoice. Normalize to match the option values exactly.
+          gst_rate: String(Number(li.gst_rate)),
         })),
       });
     })();
