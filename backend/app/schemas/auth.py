@@ -1,6 +1,6 @@
 import re
 
-from pydantic import AfterValidator, BaseModel
+from pydantic import AfterValidator, BaseModel, Field
 from typing_extensions import Annotated
 
 # Plain str + regex instead of pydantic's EmailStr: EmailStr (via
@@ -24,7 +24,10 @@ EmailStr = Annotated[str, AfterValidator(_validate_email)]
 class SignupRequest(BaseModel):
     business_name: str
     email: EmailStr
-    password: str
+    # The frontend enforces an 8-character minimum (AuthPage.tsx); enforce it
+    # here too so the API can't be used directly (or by a future second
+    # client) to create accounts with trivially weak passwords.
+    password: str = Field(min_length=8)
 
 
 class LoginRequest(BaseModel):
