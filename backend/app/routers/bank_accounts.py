@@ -25,6 +25,18 @@ def list_bank_accounts(
     return db.query(BankAccount).filter(BankAccount.business_id == business.id).all()
 
 
+def _clear_other_defaults(
+    db: Session, business: Business, exclude_id: uuid.UUID | None = None
+) -> None:
+    """Only one bank account per business may be marked default."""
+    query = db.query(BankAccount).filter(
+        BankAccount.business_id == business.id, BankAccount.is_default.is_(True)
+    )
+    if exclude_id is not None:
+        query = query.filter(BankAccount.id != exclude_id)
+    query.update({"is_default": False})
+
+
 @router.post("", response_model=BankAccountRead, status_code=status.HTTP_201_CREATED)
 def create_bank_account(
     body: BankAccountCreate,
@@ -33,6 +45,9 @@ def create_bank_account(
 ):
     account = BankAccount(business_id=business.id, **body.model_dump())
     db.add(account)
+    if account.is_default:
+        db.flush()
+        _clear_other_defaults(db, business, exclude_id=account.id)
     db.commit()
     db.refresh(account)
     return account
@@ -48,6 +63,8 @@ def update_bank_account(
     account = _get_owned_or_404(db, business, account_id)
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(account, field, value)
+    if account.is_default:
+        _clear_other_defaults(db, business, exclude_id=account.id)
     db.commit()
     db.refresh(account)
     return account

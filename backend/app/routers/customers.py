@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -21,12 +21,11 @@ def _get_owned_or_404(db: Session, business: Business, customer_id: uuid.UUID) -
 @router.get("", response_model=list[CustomerRead])
 def list_customers(
     q: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     business: Business = Depends(get_current_business),
     db: Session = Depends(get_db),
 ):
-    limit = min(limit, 200)
     query = db.query(Customer).filter(Customer.business_id == business.id)
     if q:
         query = query.filter(Customer.name.ilike(f"%{q}%"))
