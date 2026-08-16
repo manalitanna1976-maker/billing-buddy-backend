@@ -111,8 +111,9 @@ export default function AuthPage() {
             >
               <h1 className="font-serif text-2xl font-semibold text-ink">Welcome back</h1>
               <div>
-                <label className={labelClass}>Email</label>
+                <label htmlFor="login-email" className={labelClass}>Email</label>
                 <input
+                  id="login-email"
                   {...loginForm.register("email", { required: true })}
                   type="email"
                   autoComplete="email"
@@ -120,8 +121,9 @@ export default function AuthPage() {
                 />
               </div>
               <div>
-                <label className={labelClass}>Password</label>
+                <label htmlFor="login-password" className={labelClass}>Password</label>
                 <input
+                  id="login-password"
                   {...loginForm.register("password", { required: true })}
                   type="password"
                   autoComplete="current-password"
@@ -152,15 +154,17 @@ export default function AuthPage() {
             >
               <h1 className="font-serif text-2xl font-semibold text-ink">Create your account</h1>
               <div>
-                <label className={labelClass}>Business name</label>
+                <label htmlFor="signup-business-name" className={labelClass}>Business name</label>
                 <input
+                  id="signup-business-name"
                   {...signupForm.register("business_name", { required: true })}
                   className={inputClass}
                 />
               </div>
               <div>
-                <label className={labelClass}>Work email</label>
+                <label htmlFor="signup-email" className={labelClass}>Work email</label>
                 <input
+                  id="signup-email"
                   {...signupForm.register("email", { required: true })}
                   type="email"
                   autoComplete="email"
@@ -168,8 +172,9 @@ export default function AuthPage() {
                 />
               </div>
               <div>
-                <label className={labelClass}>Password</label>
+                <label htmlFor="signup-password" className={labelClass}>Password</label>
                 <input
+                  id="signup-password"
                   {...signupForm.register("password", { required: true, minLength: 8 })}
                   type="password"
                   autoComplete="new-password"
@@ -177,8 +182,9 @@ export default function AuthPage() {
                 />
               </div>
               <div>
-                <label className={labelClass}>Confirm password</label>
+                <label htmlFor="signup-confirm-password" className={labelClass}>Confirm password</label>
                 <input
+                  id="signup-confirm-password"
                   {...signupForm.register("confirm_password", { required: true })}
                   type="password"
                   autoComplete="new-password"
