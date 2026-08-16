@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
-from app.routers import auth, business
+from app.routers import auth, bank_accounts, business
 
 settings = get_settings()
 
@@ -21,6 +21,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(business.router)
+app.include_router(bank_accounts.router)
 
 Path(get_settings().upload_dir).mkdir(exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=get_settings().upload_dir), name="uploads")
