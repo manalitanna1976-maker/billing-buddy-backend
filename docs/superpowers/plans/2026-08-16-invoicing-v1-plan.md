@@ -295,7 +295,10 @@ class Customer(Base):
 
 class Invoice(Base):
     __tablename__ = "invoices"
-    __table_args__ = (Index("ix_invoices_business_id_created_at", "business_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_invoices_business_id_created_at", "business_id", "created_at"),
+        Index("ux_invoices_business_id_invoice_no", "business_id", "invoice_no", unique=True),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("businesses.id"), index=True)
@@ -326,7 +329,7 @@ class Invoice(Base):
     tax_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
     grand_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
     payment_type: Mapped[str] = mapped_column(String(10), default="credit")
-    status: Mapped[str] = mapped_column(String(10), default="draft")
+    status: Mapped[str] = mapped_column(String(10), default="draft")  # draft | saved | cancelled
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     line_items: Mapped[list["InvoiceLineItem"]] = relationship(
@@ -817,7 +820,7 @@ git commit -m "feat(backend): add business profile get/update endpoints"
 
 **Interfaces:**
 - Consumes: `app.config.get_settings` (Task 1), `app.deps.get_current_business` (Task 3)
-- Produces: `app.storage.save_upload(business_id: uuid.UUID, kind: str, filename: str, content: bytes) -> str` — writes to `uploads/{business_id}/{kind}{ext}`, returns the URL path `/uploads/{business_id}/{kind}{ext}` to store on the model.
+- Produces: `app.storage.save_upload(business_id: uuid.UUID, kind: str, filename: str, content: bytes) -> str` — validates both the file extension *and* the content's magic bytes (rejects a relabeled non-image even if the extension looks legitimate), writes to `uploads/{business_id}/{kind}{ext}`, returns the URL path `/uploads/{business_id}/{kind}{ext}` to store on the model. Raises `ValueError` on either check failing.
 - Produces: `POST /business/logo` (multipart `file`) → `BusinessRead`, `POST /business/signature` (multipart `file`) → `BusinessRead`
 
 - [ ] **Step 1: Write `app/storage.py`**
@@ -831,11 +834,27 @@ from app.config import get_settings
 settings = get_settings()
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 
+# Magic-byte signatures — the extension alone doesn't prove the content is
+# actually an image; a relabeled arbitrary file would otherwise be accepted
+# and served back to browsers from /uploads/...
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_JPEG_SIGNATURE = b"\xff\xd8\xff"
+
+
+def _looks_like_image(ext: str, content: bytes) -> bool:
+    if ext == ".png":
+        return content.startswith(_PNG_SIGNATURE)
+    if ext in (".jpg", ".jpeg"):
+        return content.startswith(_JPEG_SIGNATURE)
+    return False
+
 
 def save_upload(business_id: uuid.UUID, kind: str, filename: str, content: bytes) -> str:
     ext = Path(filename).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise ValueError(f"Unsupported file type: {ext}")
+    if not _looks_like_image(ext, content):
+        raise ValueError("File content does not match a supported image format")
 
     business_dir = Path(settings.upload_dir) / str(business_id)
     business_dir.mkdir(parents=True, exist_ok=True)
@@ -862,11 +881,14 @@ def _signup_and_headers(client, email="owner@upload.test"):
     return {"Authorization": f"Bearer {token}"}
 
 
+PNG_MAGIC_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16  # minimal valid PNG signature + padding
+
+
 def test_upload_logo(client, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     headers = _signup_and_headers(client)
 
-    file_bytes = io.BytesIO(b"fake-png-bytes")
+    file_bytes = io.BytesIO(PNG_MAGIC_BYTES)
     resp = client.post(
         "/business/logo",
         headers=headers,
@@ -880,11 +902,24 @@ def test_upload_rejects_bad_extension(client, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     headers = _signup_and_headers(client)
 
-    file_bytes = io.BytesIO(b"not-an-image")
+    file_bytes = io.BytesIO(PNG_MAGIC_BYTES)
     resp = client.post(
         "/business/logo",
         headers=headers,
         files={"file": ("virus.exe", file_bytes, "application/octet-stream")},
+    )
+    assert resp.status_code == 422
+
+
+def test_upload_rejects_content_not_matching_extension(client, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    headers = _signup_and_headers(client)
+
+    file_bytes = io.BytesIO(b"this is not an image, just relabeled as one")
+    resp = client.post(
+        "/business/logo",
+        headers=headers,
+        files={"file": ("logo.png", file_bytes, "image/png")},
     )
     assert resp.status_code == 422
 ```
@@ -1754,7 +1789,7 @@ git commit -m "feat(backend): add invoice auto-numbering service"
 **Interfaces:**
 - Consumes: `app.deps.get_current_business` (Task 3), `app.services.gst.{LineItemInput, compute_invoice_totals}` (Task 8), `app.services.numbering.next_invoice_number` (Task 9), `app.models.{Invoice, InvoiceLineItem, Customer}` (Task 2)
 - Produces: `POST /invoices` (body: `InvoiceCreate`) → `InvoiceRead` (201) — computes `same_state` from `business.state == customer.place_of_supply`, calls `compute_invoice_totals`, persists `Invoice` + `InvoiceLineItem` rows with computed totals, assigns `invoice_no` via `next_invoice_number`
-- Produces: `GET /invoices?limit=<n>&offset=<n>` → `list[InvoiceListItem]` (id, invoice_no, invoice_date, customer name, grand_total, status; ordered newest-first; `limit` default 50, max 200; `offset` default 0 — required at scale, a single tenant can accumulate up to and beyond 1M invoices and the list endpoint must never attempt to load them all into one response), `GET /invoices/{id}` → `InvoiceRead` (full detail incl. line items and totals), `PUT /invoices/{id}` → `InvoiceRead` (recomputes totals the same way), `DELETE /invoices/{id}` → 204
+- Produces: `GET /invoices?limit=<n>&offset=<n>` → `list[InvoiceListItem]` (id, invoice_no, invoice_date, customer name, grand_total, status; ordered newest-first; `limit` default 50, max 200; `offset` default 0 — required at scale, a single tenant can accumulate up to and beyond 1M invoices and the list endpoint must never attempt to load them all into one response), `GET /invoices/{id}` → `InvoiceRead` (full detail incl. line items and totals), `PUT /invoices/{id}` → `InvoiceRead` (recomputes totals the same way), `DELETE /invoices/{id}` → `InvoiceRead` (200) — **soft delete**: sets `status = "cancelled"`, row and `invoice_no` are retained. GST invoice numbers are sequential and legally significant; a hard delete would leave a silent, unexplained gap in the sequence with no record the invoice ever existed. `(business_id, invoice_no)` also carries a unique constraint (Task 2) so the numbering service can never silently double-assign a number.
 
 - [ ] **Step 1: Write `app/schemas/invoice.py`**
 
@@ -1948,6 +1983,70 @@ def test_invoice_cross_tenant_404(client):
 
     resp = client.get(f"/invoices/{invoice_id}", headers=headers_b)
     assert resp.status_code == 404
+
+
+def test_delete_invoice_is_a_soft_cancel(client):
+    headers, customer_id = _setup(client)
+    create_resp = client.post(
+        "/invoices",
+        headers=headers,
+        json={
+            "customer_id": customer_id,
+            "invoice_date": "2026-08-16",
+            "line_items": [{"product_name": "Steel Rod", "qty": "1", "price": "100", "gst_rate": "0"}],
+        },
+    )
+    invoice_id = create_resp.json()["id"]
+    invoice_no = create_resp.json()["invoice_no"]
+
+    delete_resp = client.delete(f"/invoices/{invoice_id}", headers=headers)
+    assert delete_resp.status_code == 200
+    assert delete_resp.json()["status"] == "cancelled"
+
+    # row and invoice_no are retained, not removed — GST numbers must not
+    # silently disappear
+    get_resp = client.get(f"/invoices/{invoice_id}", headers=headers)
+    assert get_resp.status_code == 200
+    assert get_resp.json()["status"] == "cancelled"
+    assert get_resp.json()["invoice_no"] == invoice_no
+
+
+def test_duplicate_invoice_no_rejected_by_unique_constraint(client, db_session):
+    # Attempt to insert a second row with the same (business_id, invoice_no)
+    # directly at the DB layer — this is what the unique index must block,
+    # independent of whatever the numbering service does.
+    import uuid as uuid_module
+    from datetime import date
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models import Invoice
+
+    headers, customer_id = _setup(client)
+    create_resp = client.post(
+        "/invoices",
+        headers=headers,
+        json={
+            "customer_id": customer_id,
+            "invoice_date": "2026-08-16",
+            "line_items": [{"product_name": "Steel Rod", "qty": "1", "price": "100", "gst_rate": "0"}],
+        },
+    )
+    original = db_session.query(Invoice).filter(Invoice.invoice_no == create_resp.json()["invoice_no"]).one()
+
+    duplicate = Invoice(
+        business_id=original.business_id,
+        customer_id=uuid_module.UUID(customer_id),
+        invoice_no=original.invoice_no,
+        invoice_date=date(2026, 8, 16),
+    )
+    db_session.add(duplicate)
+
+    try:
+        db_session.commit()
+        assert False, "expected IntegrityError from unique (business_id, invoice_no) index"
+    except IntegrityError:
+        db_session.rollback()
 ```
 
 - [ ] **Step 3: Run test to verify it fails**
@@ -2096,15 +2195,21 @@ def update_invoice(
     return invoice
 
 
-@router.delete("/{invoice_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_invoice(
+@router.delete("/{invoice_id}", response_model=InvoiceRead)
+def cancel_invoice(
     invoice_id: uuid.UUID,
     business: Business = Depends(get_current_business),
     db: Session = Depends(get_db),
 ):
+    # Soft delete only: GST invoice numbers are sequential and legally
+    # significant, so a hard delete would leave an unexplained gap with no
+    # record the invoice ever existed. Cancelling preserves the row and its
+    # invoice_no while marking it void.
     invoice = _get_owned_or_404(db, business, invoice_id)
-    db.delete(invoice)
+    invoice.status = "cancelled"
     db.commit()
+    db.refresh(invoice)
+    return invoice
 ```
 
 - [ ] **Step 5: Wire the router into `app/main.py`**
