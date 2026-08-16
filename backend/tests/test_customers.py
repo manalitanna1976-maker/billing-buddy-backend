@@ -30,7 +30,24 @@ def test_update_customer(client):
     customer_id = create_resp.json()["id"]
 
     update_resp = client.put(
-        f"/customers/{customer_id}", headers=headers, json={"gstin_pan": "27AAAAA0000A1Z5"}
+        f"/customers/{customer_id}",
+        headers=headers,
+        json={"gstin": "27AAAAA0000A1Z5", "pan": "AAAAA0000A"},
     )
     assert update_resp.status_code == 200
-    assert update_resp.json()["gstin_pan"] == "27AAAAA0000A1Z5"
+    assert update_resp.json()["gstin"] == "27AAAAA0000A1Z5"
+    assert update_resp.json()["pan"] == "AAAAA0000A"
+
+
+def test_customer_create_persists_gstin_and_pan_separately(client):
+    headers = _headers(client)
+    create_resp = client.post(
+        "/customers",
+        headers=headers,
+        json={"name": "Gamma Ltd", "gstin": "24AAAAA0000A1Z5", "pan": "AAAAA0000A"},
+    )
+    assert create_resp.status_code == 201
+    body = create_resp.json()
+    assert body["gstin"] == "24AAAAA0000A1Z5"
+    assert body["pan"] == "AAAAA0000A"
+    assert "gstin_pan" not in body

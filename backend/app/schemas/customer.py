@@ -8,7 +8,8 @@ class CustomerCreate(BaseModel):
     address: str | None = None
     contact_person: str | None = None
     phone: str | None = None
-    gstin_pan: str | None = None
+    gstin: str | None = None
+    pan: str | None = None
     place_of_supply: str | None = None
     reverse_charge: bool = False
     ship_to: str | None = None
@@ -19,7 +20,8 @@ class CustomerUpdate(BaseModel):
     address: str | None = None
     contact_person: str | None = None
     phone: str | None = None
-    gstin_pan: str | None = None
+    gstin: str | None = None
+    pan: str | None = None
     place_of_supply: str | None = None
     reverse_charge: bool | None = None
     ship_to: str | None = None
@@ -33,7 +35,8 @@ class CustomerRead(BaseModel):
     address: str | None
     contact_person: str | None
     phone: str | None
-    gstin_pan: str | None
+    gstin: str | None
+    pan: str | None
     place_of_supply: str | None
     reverse_charge: bool
     ship_to: str | None

@@ -33,7 +33,7 @@
   <h2>Bill To</h2>
   <div>{{ customer.name }}</div>
   <div>{{ customer.address or "" }}</div>
-  <div>GSTIN/PAN: {{ customer.gstin_pan or "-" }}</div>
+  <div>GSTIN: {{ customer.gstin or "-" }} &middot; PAN: {{ customer.pan or "-" }}</div>
   <div>Place of Supply: {{ customer.place_of_supply or "-" }}</div>
 
   <table>
