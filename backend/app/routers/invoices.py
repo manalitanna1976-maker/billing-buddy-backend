@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session, joinedload
 
 from app.db import get_db
@@ -9,6 +9,7 @@ from app.models import Business, Customer, Invoice, InvoiceLineItem
 from app.schemas.invoice import InvoiceCreate, InvoiceListItem, InvoiceRead
 from app.services.gst import LineItemInput, compute_invoice_totals, line_taxable_value
 from app.services.numbering import next_invoice_number
+from app.services.pdf import render_invoice_pdf
 
 router = APIRouter(prefix="/invoices", tags=["invoices"])
 
@@ -149,3 +150,18 @@ def cancel_invoice(
     db.commit()
     db.refresh(invoice)
     return invoice
+
+
+@router.get("/{invoice_id}/pdf")
+def download_invoice_pdf(
+    invoice_id: uuid.UUID,
+    business: Business = Depends(get_current_business),
+    db: Session = Depends(get_db),
+):
+    invoice = _get_owned_or_404(db, business, invoice_id)
+    pdf_bytes = render_invoice_pdf(invoice)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{invoice.invoice_no}.pdf"'},
+    )
