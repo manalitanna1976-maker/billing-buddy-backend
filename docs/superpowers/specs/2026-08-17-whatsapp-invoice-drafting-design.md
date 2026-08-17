@@ -1,6 +1,6 @@
 # WhatsApp Invoice Drafting — Design Spec
 
-**Status:** Approved for implementation planning
+**Status:** Revised after adversarial review — ready for implementation planning
 **Date:** 2026-08-17
 **Scope:** Owner-only command flow, v1
 
@@ -62,6 +62,15 @@ does everything slow — parsing, conversation merge, invoice creation, PDF
 generation, send-back — so a crash or deploy mid-request can never silently
 drop a draft.
 
+The worker runs as its own process (e.g. `python -m app.workers.whatsapp_worker`),
+separate from the FastAPI app, supervised the same way as any other
+long-running process in deployment. It can be scaled to multiple instances;
+job claiming uses `SELECT ... FOR UPDATE SKIP LOCKED` against `whatsapp_jobs`
+so two workers can never pick up the same job. This isn't optional hardening —
+without it, autoscaling or a rollout overlap double-processes a job, which
+compounds directly into duplicate invoice creation (see confirm idempotency
+below).
+
 ```mermaid
 flowchart LR
     WA["WhatsApp BSP<br/>(Gupshup / Interakt / AiSensy)"] <-->|webhook / send| RT["whatsapp.py router<br/>(signature-verified, fast ACK)"]
@@ -86,11 +95,11 @@ the same `InvoiceCreate` payload the web form does. Five new tables:
 
 | Table | Purpose | Key fields |
 |---|---|---|
-| `whatsapp_connections` | One connected WhatsApp number per business. | `business_id` (unique), `phone_number_id`, `waba_id`, `access_token_encrypted`, `status` |
-| `whatsapp_authorized_senders` | Which real CRM users may issue commands, and from which phone. | `business_id`, `phone_e164`, `user_id` |
-| `whatsapp_conversations` | In-progress draft state per sender; expires after inactivity. `lock_version` guards concurrent merges (WhatsApp Web + phone, double-tap Confirm). | `business_id`, `sender_phone_e164`, `state`, `draft_payload` (jsonb), `lock_version`, `invoice_id` (nullable), `expires_at` |
+| `whatsapp_connections` | One connected WhatsApp number per business. Every webhook lookup filters on `status = 'active'` — never resolves a business from a disconnected/revoked connection, in case a BSP ever recycles a `phone_number_id` to a different tenant. | `business_id` (unique), `phone_number_id`, `waba_id`, `access_token_encrypted`, `status` |
+| `whatsapp_authorized_senders` | Which real CRM users may issue commands, and from which phone. Enrollment requires the same permission as invoice creation (or higher) and is written to the audit trail — not self-service by any logged-in user, otherwise a low-privilege user could add their own number and gain invoice-create power regardless of their RBAC role. | `business_id`, `phone_e164`, `user_id` |
+| `whatsapp_conversations` | In-progress draft state per sender; expires after inactivity. Every read-modify-write against a conversation row — slot-fill merges, and the confirm→create transition — takes `SELECT ... FOR UPDATE` on that row, same mechanism as job claiming below, so two in-flight updates (second device, double-tap) serialize instead of racing. | `business_id`, `sender_phone_e164`, `state`, `draft_payload` (jsonb), `invoice_id` (nullable), `expires_at` |
 | `whatsapp_message_log` | Inbound message id dedup + audit trail — the trace support walks when an owner disputes what the AI parsed. | `wa_message_id` (unique), `direction`, `conversation_id`, `created_at` |
-| `whatsapp_jobs` | Durable queue between the webhook (fast ACK) and the worker (slow work). | `type`, `payload` (jsonb), `status`, `attempts`, `created_at`, `processed_at` |
+| `whatsapp_jobs` | Durable queue between the webhook (fast ACK) and the worker (slow work). `type` includes `inbound_message` and `outbound_send` — the PDF/confirmation send-back is its own retryable job, decoupled from invoice creation, so a WhatsApp delivery failure after the invoice is already committed doesn't strand the owner with no notification. Claimed via `SELECT ... FOR UPDATE SKIP LOCKED`. | `type`, `payload` (jsonb), `status`, `attempts`, `created_at`, `processed_at` |
 
 ## Message flow
 
@@ -112,12 +121,14 @@ sequenceDiagram
     W->>AI: extract draft from message + conversation state
     AI-->>W: {customer match, line_items, gaps: []}
     W->>W: lock conversation row, merge draft
-    W->>WA: interactive confirm — "₹5,900 incl. GST — Confirm / Edit"
+    W->>WA: interactive confirm — "ABC Corp (GSTIN ...1234) — ₹5,900 incl. GST — Confirm / Edit"
     Owner->>WA: taps Confirm
     WA->>BE: POST /whatsapp/webhook (button reply) → enqueued same path
+    W->>W: SELECT ... FOR UPDATE conversation; if state == 'confirmed', no-op and re-send last result
+    W->>W: set state = 'confirmed' (commit before calling SVC)
     W->>SVC: create_invoice_for_business(draft) — same function web app uses
     SVC-->>W: Invoice INV-0042, PDF bytes
-    W->>Q: mark conversation.invoice_id = INV-0042
+    W->>Q: set conversation.invoice_id = INV-0042; enqueue outbound_send job
     W->>WA: send text + PDF document
     WA->>Owner: "Invoice INV-0042 created" + PDF
 ```
@@ -128,6 +139,18 @@ the confirm — the same conversation record accumulates answers until nothing
 is missing. If the worker crashes mid-job, the row in `whatsapp_jobs` stays
 pending and is retried, not lost.
 
+**Confirm is idempotent by construction.** Two rapid taps of Confirm are two
+distinct WhatsApp messages (distinct `wa_message_id`s), so message-level
+dedup does not catch them — the second confirm webhook enqueues its own job.
+What prevents a duplicate invoice is the row lock in the step above: the
+worker locks the conversation row, checks `state`, and only calls
+`create_invoice_for_business()` on the transition into `'confirmed'`. A
+second confirm that finds the state already `'confirmed'` is a no-op that
+just re-sends the existing result. The confirm message itself always
+restates the resolved customer name (and GSTIN, if the customer has one) —
+not just the total — so a bad fuzzy-match on the customer is visible before
+the owner commits to it, not after.
+
 ## Security & compliance
 
 - **Webhook authenticity** — every inbound POST verified against the BSP's
@@ -137,22 +160,45 @@ pending and is retried, not lost.
   sending phone number is in `whatsapp_authorized_senders` for that business
   *and* the linked user currently holds invoice-create permission, re-checked
   live against RBAC — not cached.
+- **Sender enrollment is itself access-controlled** — adding a phone number
+  to `whatsapp_authorized_senders` requires the same permission as invoice
+  creation (or higher, e.g. "manage integrations") and is audit-logged. This
+  is not a self-service action available to any logged-in user — otherwise
+  enrollment becomes the actual privilege-escalation path onto invoice
+  creation, independent of whatever RBAC role the user holds.
+- **Connection resolution checks `status = 'active'`** — the webhook handler
+  never resolves a business from a `whatsapp_connections` row that isn't
+  active, so a disconnected/revoked connection can't route messages to the
+  wrong tenant if a BSP ever reassigns a `phone_number_id`.
 - **Token storage** — the BSP API key / long-lived token is encrypted at
-  rest, never logged.
+  rest using the project's existing secrets-encryption mechanism (see
+  implementation plan for the specific key-management path — env-held master
+  key vs. KMS), never logged.
 - **Idempotency** — webhooks can be redelivered; every `wa_message_id` is
   inserted with a unique constraint and deduped before processing (same
-  insert-or-skip pattern as the invoice_no race fix).
+  insert-or-skip pattern as the invoice_no race fix). Message-level dedup
+  does **not** cover a genuine second Confirm tap (a distinct message) — see
+  "Confirm is idempotent by construction" above for how that's handled.
 - **Draft expiry** — an unconfirmed conversation auto-expires after 30
   minutes so a stale "Confirm" tap can't resurrect an old, possibly wrong,
   draft.
-- **Concurrent updates** — merging a slot-fill answer into a draft takes a
-  row lock (`lock_version` optimistic check) on `whatsapp_conversations`, so
-  a double-tap or a second device can't silently overwrite an in-flight
-  merge.
-- **LLM data exposure** — message text (customer names, amounts, whatever the
-  owner types) is sent to Claude's API for parsing. Needs a line in the
-  privacy policy / ToS before launch. No GSTIN/PAN redaction in v1 — flagged
-  as v2 hardening.
+- **Concurrent updates** — every read-modify-write against a conversation row
+  (slot-fill merge, or the confirm→create transition) takes
+  `SELECT ... FOR UPDATE` on that row, so a double-tap or a second device
+  serializes instead of racing.
+- **Rate limiting** — the webhook path enforces a per-business/per-sender
+  rate limit, same pattern as the existing login rate-limit. This is a
+  required control, not a nice-to-have: an authorized sender's number being
+  spammed (SIM-swap, fat-finger, or deliberate abuse) otherwise burns Claude
+  API spend and creates unbounded junk conversation rows with no technical
+  ceiling.
+- **LLM data exposure** — message text (customer names, amounts, and
+  potentially GSTIN/PAN if the owner types them) is sent to Claude's API for
+  parsing. For a GST-compliance product operating in India, this is a
+  cross-border transfer of customer PII to a third-party processor and needs
+  a real legal review under the DPDP Act 2023 — not just a line in the
+  privacy policy. No GSTIN/PAN redaction in v1 — flagged as v2 hardening,
+  contingent on that review.
 - **24-hour session window** — every bot reply happens inside WhatsApp's
   session window since it only ever responds to an inbound message. Only
   matters if v2 adds proactive nudges ("you have a pending draft"), which
@@ -169,7 +215,10 @@ pending and is retried, not lost.
 | Invalid webhook signature | 403, no processing, logged as a security event. |
 | Sender not in authorized list | Polite "this number isn't linked to an account" reply; logged, not processed further. |
 | invoice_no race on concurrent confirms | Same unique-constraint + retry-on-409 pattern already used by the web endpoint. |
+| Second Confirm tap on an already-confirmed draft | Row-locked state check finds `state == 'confirmed'`, no-ops, re-sends the existing result instead of creating a second invoice. |
+| WhatsApp send fails after the invoice is already created | Invoice remains committed (it's the source of truth); the send is a separate retryable `outbound_send` job in `whatsapp_jobs`, retried independently — never silently drops the owner's notification. |
 | Worker crashes mid-job | Job stays `pending`/`processing` in `whatsapp_jobs`; retried with backoff. After N attempts, moves to a dead-letter status and alerts — never silently disappears. |
+| Two workers claim the same job (autoscaling/rollout overlap) | Prevented structurally — `SELECT ... FOR UPDATE SKIP LOCKED` means only one worker ever holds a given job row. |
 
 ## Testing
 
@@ -178,10 +227,19 @@ pending and is retried, not lost.
 - Webhook signature verification — valid, invalid, replayed `wa_message_id`.
 - Conversation state machine — multi-turn slot-filling, expiry after
   inactivity, concurrent-merge lock behavior.
+- **Double-confirm idempotency** — two confirm webhooks for the same
+  conversation (simulating a double-tap) must produce exactly one invoice.
+- **Job-claim concurrency** — two worker instances polling concurrently must
+  never process the same `whatsapp_jobs` row twice.
+- **Outbound send failure** — invoice creation succeeds, mocked WhatsApp send
+  fails; the `outbound_send` job is retried and eventually delivered, without
+  creating a second invoice.
 - End-to-end: simulated webhook payload → confirm → invoice row created →
   mocked WhatsApp send receives the PDF.
 - Security: unauthorized sender rejected, RBAC permission revoked mid-
-  conversation blocks confirm.
+  conversation blocks confirm, sender enrollment blocked without the
+  required permission, webhook rejects a `phone_number_id` mapped to a
+  non-active connection.
 
 ## Phased scope
 
@@ -199,5 +257,9 @@ throughput outgrows a Postgres-polled table.
 ## Open questions
 
 - Which BSP — Gupshup, Interakt, or AiSensy?
-- Should there be a per-business monthly cap on AI-parsed messages, to bound
-  Claude API spend if a number gets spammed?
+- DPDP Act legal review on sending customer PII to Claude's API — needs
+  sign-off before launch, not just a privacy-policy line (see Security &
+  compliance).
+- Should there be a per-business *monthly* cap on AI-parsed messages, on top
+  of the required per-sender rate limit, to bound worst-case Claude API
+  spend?
