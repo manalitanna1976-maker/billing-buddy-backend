@@ -12,3 +12,4 @@ frontend/.env
 
 # SDD scratch workspace (superpowers subagent-driven-development)
 .superpowers/
+backend/.git.DISABLED-nested-repo-aug17/
