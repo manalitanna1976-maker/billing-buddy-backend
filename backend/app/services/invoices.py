@@ -76,5 +76,7 @@ def create_invoice_for_business(db: Session, business: Business, body: InvoiceCr
     apply_totals_and_items(invoice, body, business, customer)
     db.add(invoice)
     db.flush()
-    db.refresh(invoice)
+    # No db.refresh() here: Invoice has no server-side column defaults, so
+    # flush() already populates the instance, and the caller commits (which
+    # re-expires everything) then refreshes if it needs post-commit state.
     return invoice
