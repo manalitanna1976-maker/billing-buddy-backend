@@ -9,3 +9,6 @@ frontend/dist/
 frontend/.env
 *.pyc
 .DS_Store
+
+# SDD scratch workspace (superpowers subagent-driven-development)
+.superpowers/
