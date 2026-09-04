@@ -29,7 +29,7 @@ def get_current_business(
     # Signature and expiry alone aren't enough -- a token logged out via
     # POST /auth/logout is still cryptographically valid until it expires,
     # so it must also be checked against the revocation list.
-    if is_token_revoked(jti):
+    if is_token_revoked(db, jti):
         raise credentials_error
 
     business = db.get(Business, business_id)

@@ -118,6 +118,31 @@ class Invoice(Base):
     business: Mapped["Business"] = relationship()
 
 
+class RevokedToken(Base):
+    """A JWT id (jti) that has been logged out and must be rejected until it
+    would have expired on its own. Shared across web and worker processes."""
+
+    __tablename__ = "revoked_tokens"
+
+    jti: Mapped[str] = mapped_column(String(64), primary_key=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class RateLimitEvent(Base):
+    """One recorded failed-login (or, in future, other rate-limited) attempt.
+    Rows are counted within a sliding window per `bucket_key`. Shared across
+    web and worker processes."""
+
+    __tablename__ = "rate_limit_events"
+    __table_args__ = (
+        Index("ix_rate_limit_events_bucket_key_occurred_at", "bucket_key", "occurred_at"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    bucket_key: Mapped[str] = mapped_column(String(255), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class InvoiceLineItem(Base):
     __tablename__ = "invoice_line_items"
 

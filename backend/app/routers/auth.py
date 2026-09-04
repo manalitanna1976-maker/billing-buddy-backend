@@ -54,7 +54,7 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
     # per-IP failed-attempt caps). Checked before touching the DB so a
     # locked-out caller can't be used to keep probing for account
     # existence via timing.
-    if is_login_rate_limited(body.email, client_ip):
+    if is_login_rate_limited(db, body.email, client_ip):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts. Please try again in a few minutes.",
@@ -68,16 +68,16 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
     # letting an attacker enumerate registered emails by response time.
     password_ok = verify_password_or_dummy(body.password, user.password_hash if user else None)
     if not user or not password_ok:
-        record_failed_login(body.email, client_ip)
+        record_failed_login(db, body.email, client_ip)
         raise unauthorized
 
-    reset_failed_logins(body.email)
+    reset_failed_logins(db, body.email)
     token = create_access_token(user_id=user.id, business_id=user.business_id)
     return TokenResponse(access_token=token)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(token: str = Depends(oauth2_scheme)):
+def logout(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     try:
         payload = decode_access_token(token)
         jti = payload["jti"]
@@ -86,4 +86,4 @@ def logout(token: str = Depends(oauth2_scheme)):
         # Already invalid, malformed, or expired -- nothing to revoke.
         # Logout is idempotent: either way, this token can't be used again.
         return
-    revoke_token(jti, exp)
+    revoke_token(db, jti, exp)

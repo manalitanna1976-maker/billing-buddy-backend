@@ -1,4 +1,4 @@
-"""In-memory store of revoked JWT ids (jti), backing POST /auth/logout.
+"""Postgres-backed store of revoked JWT ids (jti), backing POST /auth/logout.
 
 Access tokens are stateless by design (see app/security.py) -- signing them
 doesn't let the server invalidate one on demand. To support logout, every
@@ -6,47 +6,62 @@ token carries a unique `jti`; logging out records that jti here, and
 get_current_business (app/deps.py) rejects any token whose jti shows up in
 this store, even if the signature and expiry are otherwise still valid.
 
-v1 limitation: this is a process-local in-memory dict, matching the same
-constraint documented in app/rate_limit.py -- there is no Redis or other
-shared cache in this stack. It is correct for the single-instance deployment
-this app currently runs as: logging out invalidates the token everywhere,
-because there's only one process to invalidate it against. If the app is
-ever horizontally scaled, each instance would hold its own revocation list
-and a token revoked on instance A would still work against instance B --
-this needs to move to a shared store (e.g. Redis) at that point. Not solved
-here by design per the task scope.
+Shared-state design: revocations live in the `revoked_tokens` table, not a
+process-local dict. This is what lets the future WhatsApp worker process
+(separate from the web process) see a token revoked by the web process and
+vice versa. For the current single-instance deployment the behaviour is
+unchanged: logging out invalidates the token everywhere, because every
+process reads the same table.
+
+Growth control without a scheduler: `revoke_token` opportunistically deletes
+rows whose token has already expired (a revoked jti only needs to be
+remembered until its own expiry -- after that it's rejected by
+signature/expiry checks regardless). `sweep_expired` exposes the same prune
+for a future worker loop; nothing calls it yet.
 """
 
-import threading
-import time
+from datetime import datetime
 
-_lock = threading.Lock()
-_revoked: dict[str, float] = {}  # jti -> token expiry (epoch seconds)
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
 
-
-def _prune_locked(now: float) -> None:
-    """Must be called while holding `_lock`. A revoked jti only needs to be
-    remembered until the token itself would have expired anyway -- after
-    that it's rejected by signature/expiry checks regardless."""
-    expired = [jti for jti, exp in _revoked.items() if exp <= now]
-    for jti in expired:
-        del _revoked[jti]
+from app.models import RevokedToken
 
 
-def revoke_token(jti: str, exp: float) -> None:
-    with _lock:
-        _prune_locked(time.time())
-        _revoked[jti] = exp
+def revoke_token(db: Session, jti: str, exp: float) -> None:
+    """Record `jti` as revoked until `exp` (a Unix timestamp, the JWT `exp`
+    claim). Opportunistically prunes already-expired rows to bound growth."""
+    now = datetime.utcnow()
+    db.execute(delete(RevokedToken).where(RevokedToken.expires_at <= now))
+    if db.get(RevokedToken, jti) is None:
+        db.add(RevokedToken(jti=jti, expires_at=datetime.utcfromtimestamp(exp)))
+    db.execute(delete(RevokedToken).where(RevokedToken.expires_at <= now))
+    db.commit()
 
 
-def is_token_revoked(jti: str) -> bool:
-    with _lock:
-        _prune_locked(time.time())
-        return jti in _revoked
+def is_token_revoked(db: Session, jti: str) -> bool:
+    """True if `jti` was logged out and its token hasn't expired yet."""
+    row = db.execute(
+        select(RevokedToken.jti).where(
+            RevokedToken.jti == jti,
+            RevokedToken.expires_at > datetime.utcnow(),
+        )
+    ).first()
+    return row is not None
 
 
-def reset_all_state() -> None:
+def sweep_expired(db: Session) -> int:
+    """Delete revocation rows whose token has already expired. Returns the
+    number of rows deleted. For a future worker retention loop -- unused now."""
+    result = db.execute(
+        delete(RevokedToken).where(RevokedToken.expires_at <= datetime.utcnow())
+    )
+    db.commit()
+    return result.rowcount
+
+
+def reset_all_state(db: Session) -> None:
     """Test-only helper: clears all revocation state so one test's logout
     can't bleed into another (see tests/conftest.py)."""
-    with _lock:
-        _revoked.clear()
+    db.execute(delete(RevokedToken))
+    db.commit()

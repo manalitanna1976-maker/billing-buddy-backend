@@ -21,27 +21,17 @@ def client():
 def _reset_db():
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
+    # rate_limit / token_revocation state now lives in Postgres tables rather
+    # than in-memory dicts. The drop_all/create_all above already leaves them
+    # empty, but keep an explicit seam so the intent survives any change to
+    # the reset strategy, and so a leaked row from an aborted test is cleared.
+    s = SessionLocal()
+    try:
+        rate_limit.reset_all_state(s)
+        token_revocation.reset_all_state(s)
+    finally:
+        s.close()
     yield
-
-
-@pytest.fixture(autouse=True)
-def _reset_rate_limiter():
-    # The login rate limiter (app/rate_limit.py) keeps its counters in a
-    # module-level in-memory dict. Without resetting it, one test's
-    # failed-login hammering would bleed into and break unrelated tests.
-    rate_limit.reset_all_state()
-    yield
-    rate_limit.reset_all_state()
-
-
-@pytest.fixture(autouse=True)
-def _reset_token_revocation():
-    # Same reasoning as _reset_rate_limiter: app/token_revocation.py's store
-    # is module-level in-memory state, and would otherwise leak a logged-out
-    # token's revocation across tests.
-    token_revocation.reset_all_state()
-    yield
-    token_revocation.reset_all_state()
 
 
 @pytest.fixture
