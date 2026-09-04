@@ -19,12 +19,25 @@ what lets the future WhatsApp worker process (separate from the web
 process) share the same counters. For the current single-instance
 deployment the behaviour is unchanged.
 
-Growth control without a scheduler: `record_failed_login` opportunistically
-deletes that bucket's rows that have aged out of the window after inserting
-the new ones. `sweep_expired` exposes a broader prune for a future worker
-loop; nothing calls it yet.
+The email bucket_key is a SHA-256 digest of the normalized email, not the
+raw address: it keeps the key fixed-width (so an over-long email can't
+overflow `bucket_key` and 500 the login) and keeps raw email addresses
+out of this table.
+
+Growth control without a scheduler: `record_failed_login` does one global
+time-based prune on every write, deleting every row older than the longest
+window. That bounds the table regardless of whether any particular email
+is ever retried. `sweep_expired` exposes the same prune with an identical
+predicate for a future worker loop; nothing calls it yet.
+
+Transaction contract: the mutating helpers here (`record_failed_login`,
+`reset_failed_logins`, `sweep_expired`, `reset_all_state`) own their own
+commit -- they call `db.commit()` on the caller's session. Do not call
+them mid-transaction on a session that has other uncommitted work you
+don't want committed.
 """
 
+import hashlib
 from datetime import datetime, timedelta
 
 from sqlalchemy import delete, func, select
@@ -40,7 +53,8 @@ IP_WINDOW_SECONDS = 15 * 60
 
 
 def _email_key(email: str) -> str:
-    return f"email:{email.strip().lower()}"
+    digest = hashlib.sha256(email.strip().lower().encode()).hexdigest()
+    return f"email:{digest}"
 
 
 def _ip_key(ip: str) -> str:
@@ -70,41 +84,44 @@ def is_login_rate_limited(db: Session, email: str, ip: str) -> bool:
 
 def record_failed_login(db: Session, email: str, ip: str) -> None:
     """Record one failed attempt against both the email and IP buckets, then
-    prune each bucket's rows that have aged out of its window."""
+    prune every row older than the longest window (a single global delete, so
+    orphan buckets that are never retried still age out).
+
+    Commits the caller's session.
+    """
     now = datetime.utcnow()
-    email_key = _email_key(email)
-    ip_key = _ip_key(ip)
-    db.add(RateLimitEvent(bucket_key=email_key, occurred_at=now))
-    db.add(RateLimitEvent(bucket_key=ip_key, occurred_at=now))
+    db.add(RateLimitEvent(bucket_key=_email_key(email), occurred_at=now))
+    db.add(RateLimitEvent(bucket_key=_ip_key(ip), occurred_at=now))
     db.flush()
 
-    for bucket_key, window_seconds in (
-        (email_key, EMAIL_WINDOW_SECONDS),
-        (ip_key, IP_WINDOW_SECONDS),
-    ):
-        threshold = datetime.utcnow() - timedelta(seconds=window_seconds)
-        db.execute(
-            delete(RateLimitEvent).where(
-                RateLimitEvent.bucket_key == bucket_key,
-                RateLimitEvent.occurred_at <= threshold,
-            )
-        )
+    cutoff = datetime.utcnow() - timedelta(
+        seconds=max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS)
+    )
+    db.execute(delete(RateLimitEvent).where(RateLimitEvent.occurred_at <= cutoff))
     db.commit()
 
 
 def reset_failed_logins(db: Session, email: str) -> None:
-    """Called on a successful login: forgive that email's failed attempts."""
+    """Called on a successful login: forgive that email's failed attempts.
+
+    Commits the caller's session.
+    """
     db.execute(delete(RateLimitEvent).where(RateLimitEvent.bucket_key == _email_key(email)))
     db.commit()
 
 
 def sweep_expired(db: Session) -> int:
     """Delete rows older than the longest window. Returns rows deleted. For a
-    future worker retention loop -- unused now."""
-    longest_window = max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS)
-    threshold = datetime.utcnow() - timedelta(seconds=longest_window)
+    future worker retention loop -- unused now. Uses the same predicate as the
+    global prune in `record_failed_login`.
+
+    Commits the caller's session.
+    """
+    cutoff = datetime.utcnow() - timedelta(
+        seconds=max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS)
+    )
     result = db.execute(
-        delete(RateLimitEvent).where(RateLimitEvent.occurred_at <= threshold)
+        delete(RateLimitEvent).where(RateLimitEvent.occurred_at <= cutoff)
     )
     db.commit()
     return result.rowcount
@@ -112,6 +129,9 @@ def sweep_expired(db: Session) -> int:
 
 def reset_all_state(db: Session) -> None:
     """Test-only helper: clears all limiter state so failed-login hammering
-    in one test can't bleed into another (see tests/conftest.py)."""
+    in one test can't bleed into another (see tests/conftest.py).
+
+    Commits the caller's session.
+    """
     db.execute(delete(RateLimitEvent))
     db.commit()

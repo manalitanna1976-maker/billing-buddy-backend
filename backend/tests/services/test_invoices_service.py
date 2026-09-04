@@ -53,3 +53,16 @@ def test_create_invoice_for_business_rejects_foreign_customer(db_session):
     with pytest.raises(HTTPException) as exc:
         create_invoice_for_business(db_session, biz, body)
     assert exc.value.status_code == 404
+
+
+def test_create_invoice_for_business_does_not_commit(db_session):
+    biz, cust = _seed(db_session)
+    body = InvoiceCreate(
+        customer_id=cust.id,
+        invoice_date=dt.date(2026, 8, 17),
+        line_items=[{"product_name": "Widget", "qty": 1, "price": 100, "gst_rate": 18}],
+    )
+    create_invoice_for_business(db_session, biz, body)
+    db_session.rollback()
+    from app.models import Invoice
+    assert db_session.query(Invoice).count() == 0

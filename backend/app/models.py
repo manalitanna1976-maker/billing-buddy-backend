@@ -131,15 +131,17 @@ class RevokedToken(Base):
 class RateLimitEvent(Base):
     """One recorded failed-login (or, in future, other rate-limited) attempt.
     Rows are counted within a sliding window per `bucket_key`. Shared across
-    web and worker processes."""
+    web and worker processes. Growth is bounded by a global time-based prune
+    on every write (see app/rate_limit.py) -- no scheduler needed."""
 
     __tablename__ = "rate_limit_events"
     __table_args__ = (
         Index("ix_rate_limit_events_bucket_key_occurred_at", "bucket_key", "occurred_at"),
+        Index("ix_rate_limit_events_occurred_at", "occurred_at"),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
-    bucket_key: Mapped[str] = mapped_column(String(255), index=True)
+    bucket_key: Mapped[str] = mapped_column(String(255))
     occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

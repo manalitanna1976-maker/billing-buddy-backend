@@ -18,6 +18,16 @@ def test_signup_then_login(client):
     assert "access_token" in login_resp.json()
 
 
+def test_login_with_overlong_email_returns_401_not_500(client):
+    # LoginRequest.email is a plain regex-validated str with no max_length, so
+    # a 263-char address passes schema validation and reaches the rate limiter.
+    # The bucket_key is a fixed-width SHA-256 digest, so it can no longer
+    # overflow rate_limit_events.bucket_key (String(255)) and 500 the request.
+    long_email = "a" * 250 + "@example.test"
+    resp = client.post("/auth/login", json={"email": long_email, "password": "whatever"})
+    assert resp.status_code == 401
+
+
 def test_login_wrong_password_rejected(client):
     client.post(
         "/auth/signup",

@@ -9,7 +9,7 @@ from app.services.gst import LineItemInput, compute_invoice_totals, line_taxable
 from app.services.numbering import next_invoice_number
 
 
-def apply_totals_and_items(invoice: Invoice, body: InvoiceCreate, business: Business, customer: Customer):
+def apply_totals_and_items(invoice: Invoice, body: InvoiceCreate, business: Business, customer: Customer) -> None:
     # Both `Business.state` and `Customer.place_of_supply` are free-text
     # fields (no fixed dropdown of Indian states), so compare case/whitespace
     # insensitively — "Gujarat" vs "gujarat" is the same state for GST
@@ -59,6 +59,13 @@ def _resolve_customer(db: Session, business: Business, customer_id: uuid.UUID) -
 
 
 def create_invoice_for_business(db: Session, business: Business, body: InvoiceCreate) -> Invoice:
+    """Build and persist (flush, not commit) an invoice for `business`.
+
+    Does not commit -- the caller owns the transaction boundary (commit on
+    success, rollback on failure). Note it also mutates business.next_invoice_seq
+    via next_invoice_number(), so a caller that swallows an exception and reuses
+    the session carries a phantom sequence increment.
+    """
     customer = _resolve_customer(db, business, body.customer_id)
     invoice = Invoice(
         business_id=business.id,

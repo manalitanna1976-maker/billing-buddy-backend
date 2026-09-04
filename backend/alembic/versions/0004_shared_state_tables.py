@@ -34,19 +34,19 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint('id'),
     )
     op.create_index(
-        op.f('ix_rate_limit_events_bucket_key'), 'rate_limit_events', ['bucket_key'], unique=False
-    )
-    op.create_index(
         'ix_rate_limit_events_bucket_key_occurred_at',
         'rate_limit_events',
         ['bucket_key', 'occurred_at'],
         unique=False,
     )
+    op.create_index(
+        'ix_rate_limit_events_occurred_at', 'rate_limit_events', ['occurred_at'], unique=False
+    )
 
 
 def downgrade() -> None:
     """Downgrade schema."""
+    op.drop_index('ix_rate_limit_events_occurred_at', table_name='rate_limit_events')
     op.drop_index('ix_rate_limit_events_bucket_key_occurred_at', table_name='rate_limit_events')
-    op.drop_index(op.f('ix_rate_limit_events_bucket_key'), table_name='rate_limit_events')
     op.drop_table('rate_limit_events')
     op.drop_table('revoked_tokens')

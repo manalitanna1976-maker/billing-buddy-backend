@@ -19,3 +19,14 @@ def test_tampered_token_raises():
     tok = encrypt_secret("secret")
     with pytest.raises(InvalidToken):
         decrypt_secret(tok[:-2] + ("AA" if tok[-2:] != "AA" else "BB"))
+
+
+def test_malformed_encryption_key_rejected_at_settings_construction():
+    from pydantic import ValidationError
+    from app.config import Settings
+    with pytest.raises(ValidationError):
+        Settings(
+            database_url="postgresql+psycopg://x:x@localhost/x",
+            jwt_secret="y",
+            secret_encryption_key="not-a-valid-fernet-key",
+        )
