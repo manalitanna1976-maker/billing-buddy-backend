@@ -1,7 +1,7 @@
 # WhatsApp Invoice Drafting — Design Spec
 
-**Status:** Revised twice (adversarial review, then blocking-item review) —
-ready for implementation planning
+**Status:** Revised three times (adversarial review, blocking-item review,
+should-fix review) — ready for implementation planning
 **Date:** 2026-08-17
 **Scope:** Owner-only command flow, v1
 
@@ -109,6 +109,33 @@ def decrypt_secret(token: str) -> str: ...
 - Key rotation is out of scope for v1 (single active key); note it as a
   follow-up.
 
+### Prerequisite: move shared state to Postgres
+
+The webhook + worker topology in this spec runs as **multiple processes**
+(at minimum: the FastAPI app and a separate worker; either may be scaled
+out). Two existing subsystems keep their state in process-local in-memory
+dicts and are explicitly documented as single-instance-only:
+
+- `app/rate_limit.py` — login failed-attempt counters
+- `app/token_revocation.py` — logged-out JWT `jti` list
+
+Both are wrong the moment a second process exists: a worker can't see the
+app's revocation list, and per-sender WhatsApp rate limits tracked
+in-memory would be `limit × process_count`. Ship a prerequisite PR that
+moves both to Postgres:
+
+| Table | Replaces | Key fields |
+|---|---|---|
+| `revoked_tokens` | `token_revocation.py` dict | `jti` (pk), `expires_at`. Insert on logout; `is_token_revoked` becomes an indexed lookup; a periodic sweep (or `WHERE expires_at > now()` filter) drops rows past expiry. |
+| `rate_limit_events` | `rate_limit.py` dict | `bucket_key` (e.g. `email:x`, `ip:x`, `wa:business:sender`), `occurred_at`. A limit check counts rows in the window; a sweep trims old rows. Same sliding-window policy, now shared. |
+
+`get_current_business`, `POST /auth/login`, and `POST /auth/logout` switch
+to the table-backed calls with no behavior change for the single-instance
+case. This unblocks a shared, correct WhatsApp rate limit (below) and makes
+"RBAC re-checked live" / "revocation re-checked live" honest across the
+worker process. Keep the same test-only `reset_all_state()` seam
+(TRUNCATE the tables).
+
 ## Architecture
 
 The webhook does the minimum needed to ACK fast and durably: verify sender
@@ -117,11 +144,13 @@ does everything slow — parsing, conversation merge, invoice creation, PDF
 generation, send-back — so a crash or deploy mid-request can never silently
 drop a draft.
 
-The worker runs as its own process (e.g. `python -m app.workers.whatsapp_worker`),
-separate from the FastAPI app, supervised the same way as any other
-long-running process in deployment. It can be scaled to multiple instances;
-job claiming uses `SELECT ... FOR UPDATE SKIP LOCKED` against `whatsapp_jobs`
-so two workers can never pick up the same job. This isn't optional hardening —
+The worker runs as its own process (`python -m app.workers.whatsapp_worker`),
+separate from the FastAPI app. The repo has no production deployment today
+(dev is bare `uvicorn --reload`), so this work also lands a minimal one —
+see "Deployment" below — that supervises and auto-restarts both the web and
+worker processes. It can be scaled to multiple instances; job claiming uses
+`SELECT ... FOR UPDATE SKIP LOCKED` against `whatsapp_jobs` so two workers
+can never pick up the same job. This isn't optional hardening —
 without it, autoscaling or a rollout overlap double-processes a job, which
 compounds directly into duplicate invoice creation (see confirm idempotency
 below).
@@ -143,6 +172,41 @@ flowchart LR
     CONN["whatsapp_connections<br/>(1 per business, encrypted token)"] --> RT
 ```
 
+## Deployment (minimal, delivered with this work)
+
+There is no production deployment in the repo today. This work adds a
+`docker-compose.yml` at the repo root with three services:
+
+| Service | Command | Notes |
+|---|---|---|
+| `db` | postgres:16 | named volume; the only stateful service |
+| `web` | `uvicorn app.main:app --host 0.0.0.0` (no `--reload`) | `restart: unless-stopped` |
+| `worker` | `python -m app.workers.whatsapp_worker` | `restart: unless-stopped`; same image + env as `web`; runs the job poller **and** the retention sweep |
+
+`restart: unless-stopped` is the supervisor — a crashed worker or web
+process is restarted by the container runtime, which is what "a crash mid-job
+is retried, not lost" depends on. Both processes share one image and one
+`.env` (DB URL, JWT secret, `SECRET_ENCRYPTION_KEY`, BSP creds,
+`ANTHROPIC_API_KEY`, `DEADLETTER_WEBHOOK_URL`).
+
+**Dead-letter alerting.** When a `whatsapp_jobs` row exhausts its retries
+and moves to `status = 'dead_letter'`, the worker:
+
+1. logs it at `ERROR` with the job id, type, business id, and last error;
+2. if `DEADLETTER_WEBHOOK_URL` is set, POSTs a one-line summary to it (a
+   Slack/Discord incoming webhook, or anything that accepts a JSON body) —
+   best-effort, failure to post is itself only logged, never retried into
+   the same failure loop.
+
+That is the whole v1 alerting surface — no metrics stack, no pager. A
+`GET /whatsapp/admin/dead-letters` authenticated endpoint (business-scoped)
+lists the business's own dead-lettered jobs so support can inspect payload
+and error without DB access.
+
+Single-instance is the default (`web` ×1, `worker` ×1); the `SKIP LOCKED`
+job claim and Postgres-backed shared state (rate limit, revocation) mean
+scaling either to ×N is a compose change, not a code change.
+
 ## Data model
 
 No changes to `Invoice`, `InvoiceLineItem`, or `Customer` — the flow produces
@@ -159,9 +223,28 @@ Five new tables:
 |---|---|---|
 | `whatsapp_connections` | One connected WhatsApp number per business. Every webhook lookup filters on `status = 'active'` — never resolves a business from a disconnected/revoked connection, in case a BSP ever recycles a `phone_number_id` to a different tenant. | `business_id` (unique), `phone_number_id`, `waba_id`, `access_token_encrypted`, `status` |
 | `whatsapp_authorized_senders` | Flat per-business allowlist of phone numbers permitted to issue commands. Being listed *is* the authorization (see Auth model). Enroll/remove is done from an authenticated business session and audit-logged. No `user_id` linkage in v1 — there are no per-user roles to link to. | `business_id`, `phone_e164` (unique per business), `enrolled_at`, `enrolled_by` (business session id / email, for audit) |
-| `whatsapp_conversations` | In-progress draft state per sender; expires after inactivity. Every read-modify-write against a conversation row — slot-fill merges, and the confirm→create transition — takes `SELECT ... FOR UPDATE` on that row, same mechanism as job claiming below, so two in-flight updates (second device, double-tap) serialize instead of racing. | `business_id`, `sender_phone_e164`, `state`, `draft_payload` (jsonb), `invoice_id` (nullable), `expires_at` |
-| `whatsapp_message_log` | Inbound message id dedup + audit trail — the trace support walks when an owner disputes what the AI parsed. | `wa_message_id` (unique), `direction`, `conversation_id`, `created_at` |
-| `whatsapp_jobs` | Durable queue between the webhook (fast ACK) and the worker (slow work). `type` includes `inbound_message` and `outbound_send` — the PDF/confirmation send-back is its own retryable job, decoupled from invoice creation, so a WhatsApp delivery failure after the invoice is already committed doesn't strand the owner with no notification. Claimed via `SELECT ... FOR UPDATE SKIP LOCKED`. | `type`, `payload` (jsonb), `status`, `attempts`, `created_at`, `processed_at` |
+| `whatsapp_conversations` | In-progress draft state per sender. `draft_payload` is transient working state (may contain customer name, amounts, and GSTIN/PAN if the owner typed them), so the row is **hard-deleted 24h after it expires or is confirmed** by the sweep (see below) — it is not a record of anything, the created invoice is. Every read-modify-write — slot-fill merges, and the confirm→create transition — takes `SELECT ... FOR UPDATE` on that row, same mechanism as job claiming below, so two in-flight updates (second device, double-tap) serialize instead of racing. | `business_id`, `sender_phone_e164`, `state`, `draft_payload` (jsonb), `invoice_id` (nullable), `expires_at`, `updated_at` |
+| `whatsapp_message_log` | Inbound `wa_message_id` dedup + a thin activity trail. Stores **only** the message id, direction, linked conversation, and timestamps — **no message body and no parsed content**, so it is not a PII store and needs no special retention. Dispute resolution ("what did the AI read") relies on the owner's own WhatsApp thread plus the confirm message and the resulting invoice, not on server-stored transcripts. | `wa_message_id` (unique), `direction`, `conversation_id`, `created_at` |
+| `whatsapp_jobs` | Durable queue between the webhook (fast ACK) and the worker (slow work). `type` includes `inbound_message` and `outbound_send` — the PDF/confirmation send-back is its own retryable job, decoupled from invoice creation, so a WhatsApp delivery failure after the invoice is already committed doesn't strand the owner with no notification. Claimed via `SELECT ... FOR UPDATE SKIP LOCKED`. | `type`, `payload` (jsonb), `status` (`pending`\|`processing`\|`done`\|`dead_letter`), `attempts`, `last_error`, `claimed_at` (stale-claim reclaim), `created_at`, `processed_at` |
+
+### Retention sweep
+
+The worker runs a periodic maintenance pass (every few minutes, in the same
+loop that polls `whatsapp_jobs`) that:
+
+- hard-deletes `whatsapp_conversations` rows where
+  `expires_at < now() - interval '24 hours'` **or** `state = 'confirmed'
+  and updated_at < now() - interval '24 hours'`;
+- deletes orphaned `whatsapp_message_log` rows once their conversation is
+  gone (or keeps them capped at N days — they carry no PII either way);
+- trims `revoked_tokens` past `expires_at` and `rate_limit_events` past
+  their window (folded in from the shared-state prerequisite).
+
+A single conversation is unusable for drafting 30 minutes after the last
+message (state check); the 24h delay before the row is physically removed
+is only so a confused owner who taps a stale "Confirm" gets a clean "this
+draft expired, start again" rather than a row-not-found. No customer PII
+lingers past 24h + the draft window.
 
 ## Message flow
 
@@ -245,23 +328,32 @@ the owner commits to it, not after.
   when signing an outbound BSP request, never logged. Key rotation deferred
   to a follow-up.
 - **Idempotency** — webhooks can be redelivered; every `wa_message_id` is
-  inserted with a unique constraint and deduped before processing (same
-  insert-or-skip pattern as the invoice_no race fix). Message-level dedup
-  does **not** cover a genuine second Confirm tap (a distinct message) — see
-  "Confirm is idempotent by construction" above for how that's handled.
-- **Draft expiry** — an unconfirmed conversation auto-expires after 30
-  minutes so a stale "Confirm" tap can't resurrect an old, possibly wrong,
-  draft.
+  inserted into `whatsapp_message_log` with a unique constraint and an
+  `ON CONFLICT DO NOTHING` insert-or-skip, checked before processing.
+  Message-level dedup does **not** cover a genuine second Confirm tap (a
+  distinct message) — see "Confirm is idempotent by construction" above for
+  how that's handled.
+- **Draft expiry & deletion** — an unconfirmed conversation auto-expires
+  after 30 minutes (a stale "Confirm" tap can't resurrect an old, possibly
+  wrong draft), and the row itself — `draft_payload` and all — is
+  hard-deleted 24h after expiry or confirmation by the retention sweep (see
+  "Retention sweep"). No customer PII from a WhatsApp draft persists beyond
+  that; `whatsapp_message_log` deliberately stores no message body.
 - **Concurrent updates** — every read-modify-write against a conversation row
   (slot-fill merge, or the confirm→create transition) takes
   `SELECT ... FOR UPDATE` on that row, so a double-tap or a second device
   serializes instead of racing.
-- **Rate limiting** — the webhook path enforces a per-business/per-sender
-  rate limit, same pattern as the existing login rate-limit. This is a
-  required control, not a nice-to-have: an authorized sender's number being
-  spammed (SIM-swap, fat-finger, or deliberate abuse) otherwise burns Claude
-  API spend and creates unbounded junk conversation rows with no technical
-  ceiling.
+- **Rate limiting** — the webhook path enforces a per-business and
+  per-sender sliding-window limit using the Postgres-backed
+  `rate_limit_events` table (see "Prerequisite: move shared state to
+  Postgres"), so the limit holds across the app and worker processes rather
+  than being multiplied per instance. Same sliding-window policy shape as
+  the login limiter, shared storage. This is a required control, not a
+  nice-to-have: an authorized sender's number being spammed (SIM-swap,
+  fat-finger, or deliberate abuse) otherwise burns Claude API spend and
+  creates unbounded junk conversation rows with no technical ceiling. The
+  limit is checked in the webhook before enqueuing a job, so abuse never
+  reaches the worker or the Claude call.
 - **LLM prompt injection** — inbound WhatsApp text is attacker-influenced
   (a forwarded message, a crafted customer name) and the parser's output
   feeds `create_invoice_for_business()`, so a naive "do what the message
@@ -296,7 +388,10 @@ the owner commits to it, not after.
   cross-border transfer of customer PII to a third-party processor and needs
   a real legal review under the DPDP Act 2023 — not just a line in the
   privacy policy. No GSTIN/PAN redaction in v1 — flagged as v2 hardening,
-  contingent on that review.
+  contingent on that review. The message text is not stored server-side
+  beyond the transient `draft_payload` (deleted within 24h + the draft
+  window, see "Retention sweep"); the Claude call is made with no
+  training/retention opt-in.
 - **24-hour session window** — every bot reply happens inside WhatsApp's
   session window since it only ever responds to an inbound message. Only
   matters if v2 adds proactive nudges ("you have a pending draft"), which
@@ -313,10 +408,10 @@ the owner commits to it, not after.
 | Unrecognized reply to a confirm prompt | Re-sends the confirm buttons rather than guessing intent. |
 | Invalid webhook signature | 403, no processing, logged as a security event. |
 | Sender not in authorized list | Polite "this number isn't linked to an account" reply; logged, not processed further. |
-| invoice_no race on concurrent confirms | Same unique-constraint + retry-on-409 pattern already used by the web endpoint. |
+| invoice_no race on concurrent confirms | `next_invoice_number()` already takes `SELECT ... FOR UPDATE` on the business row before reading/incrementing `next_invoice_seq` (see `backend/app/services/numbering.py`), so concurrent invoice creations serialize on that lock and each gets a distinct number. The `ux_invoices_business_id_invoice_no` unique index is the backstop. No new handling needed — the WhatsApp worker calls the same `create_invoice_for_business()`. |
 | Second Confirm tap on an already-confirmed draft | Row-locked state check finds `state == 'confirmed'`, no-ops, re-sends the existing result instead of creating a second invoice. |
 | WhatsApp send fails after the invoice is already created | Invoice remains committed (it's the source of truth); the send is a separate retryable `outbound_send` job in `whatsapp_jobs`, retried independently — never silently drops the owner's notification. |
-| Worker crashes mid-job | Job stays `pending`/`processing` in `whatsapp_jobs`; retried with backoff. After N attempts, moves to a dead-letter status and alerts — never silently disappears. |
+| Worker crashes mid-job | Container runtime (`restart: unless-stopped`) restarts the process. A `processing` row past a stale-claim timeout is reclaimed; retried with backoff. After N attempts it moves to `status = 'dead_letter'` — logged at ERROR, POSTed to `DEADLETTER_WEBHOOK_URL` if set, and visible on `GET /whatsapp/admin/dead-letters`. Never silently disappears. |
 | Two workers claim the same job (autoscaling/rollout overlap) | Prevented structurally — `SELECT ... FOR UPDATE SKIP LOCKED` means only one worker ever holds a given job row. |
 
 ## Testing
@@ -330,12 +425,23 @@ the owner commits to it, not after.
   lookup (not the model) chooses the row; oversized message rejected before
   the Claude call.
 - Webhook signature verification — valid, invalid, replayed `wa_message_id`.
+- Rate limit — per-sender and per-business windows trip at the configured
+  cap; limit is enforced in the webhook before a job is enqueued; existing
+  login-limiter and token-revocation tests still pass after the move to
+  Postgres tables.
 - Conversation state machine — multi-turn slot-filling, expiry after
   inactivity, concurrent-merge lock behavior.
+- Retention sweep — an expired conversation and a confirmed conversation
+  are both hard-deleted after the 24h grace; `whatsapp_message_log` rows
+  never contain a message body; `revoked_tokens` / `rate_limit_events`
+  past-window rows are trimmed.
 - **Double-confirm idempotency** — two confirm webhooks for the same
   conversation (simulating a double-tap) must produce exactly one invoice.
 - **Job-claim concurrency** — two worker instances polling concurrently must
   never process the same `whatsapp_jobs` row twice.
+- **Dead-letter path** — a job that fails N times lands in `dead_letter`,
+  emits an ERROR log, attempts the webhook POST (mocked), and appears on
+  `GET /whatsapp/admin/dead-letters` scoped to the owning business only.
 - **Outbound send failure** — invoice creation succeeds, mocked WhatsApp send
   fails; the `outbound_send` job is retried and eventually delivered, without
   creating a second invoice.
@@ -353,9 +459,13 @@ the owner commits to it, not after.
 ## Phased scope
 
 **v1 (this spec):** extract `create_invoice_for_business()` (prerequisite
-refactor) · secrets-encryption helper (prerequisite) · BSP-hosted connect · Postgres-backed durable job queue ·
+refactor) · secrets-encryption helper (prerequisite) · move token-revocation
++ rate-limit state to Postgres (prerequisite) · BSP-hosted connect · Postgres-backed durable job queue ·
 free-text + slot-fill parsing · button confirm · PDF sent back on WhatsApp ·
-flat per-business sender allowlist (no per-user roles — see Auth model).
+flat per-business sender allowlist (no per-user roles — see Auth model) ·
+retention sweep (24h conversation TTL, body-free message log) ·
+`docker-compose` deploy (web + worker + db, auto-restart) · dead-letter
+logging + optional webhook + admin endpoint.
 
 **Deferred:** migrate to direct Meta Cloud API if volume/margins justify
 owning the relationship · per-user sender permissions (gate enrollment and
