@@ -5,7 +5,7 @@ from decimal import Decimal
 from sqlalchemy import (
     Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -161,3 +161,99 @@ class InvoiceLineItem(Base):
     line_total: Mapped[Decimal] = mapped_column(Numeric(12, 2))
 
     invoice: Mapped[Invoice] = relationship(back_populates="line_items")
+
+
+class WhatsAppConnection(Base):
+    """Per-business WhatsApp Business API connection. One row per business."""
+
+    __tablename__ = "whatsapp_connections"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    business_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("businesses.id"), unique=True, index=True
+    )
+    phone_number_id: Mapped[str] = mapped_column(String(64), index=True)
+    waba_id: Mapped[str] = mapped_column(String(64))
+    access_token_encrypted: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="active")  # active | disconnected
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class WhatsAppAuthorizedSender(Base):
+    """A phone number allowed to draft invoices for a business via WhatsApp."""
+
+    __tablename__ = "whatsapp_authorized_senders"
+    __table_args__ = (
+        Index("ux_wa_senders_business_phone", "business_id", "phone_e164", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("businesses.id"), index=True)
+    phone_e164: Mapped[str] = mapped_column(String(20))
+    enrolled_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    enrolled_by: Mapped[str] = mapped_column(String(200))  # business session email, for audit
+
+
+class WhatsAppConversation(Base):
+    """In-flight invoice-drafting conversation with an authorized sender."""
+
+    __tablename__ = "whatsapp_conversations"
+    __table_args__ = (
+        Index("ux_wa_conv_business_sender", "business_id", "sender_phone_e164", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("businesses.id"), index=True)
+    sender_phone_e164: Mapped[str] = mapped_column(String(20))
+    state: Mapped[str] = mapped_column(
+        String(16), default="collecting"
+    )  # collecting | awaiting_confirm | confirmed | terminal
+    draft_payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    invoice_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("invoices.id"), nullable=True
+    )
+    last_result_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class WhatsAppMessageLog(Base):
+    """Dedup / audit log of WhatsApp messages. Never stores message body."""
+
+    __tablename__ = "whatsapp_message_log"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    wa_message_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    direction: Mapped[str] = mapped_column(String(3))  # in | out
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("whatsapp_conversations.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class WhatsAppJob(Base):
+    """Durable work queue for inbound/outbound WhatsApp processing."""
+
+    __tablename__ = "whatsapp_jobs"
+    __table_args__ = (Index("ix_wa_jobs_status_created", "status", "created_at"),)
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    type: Mapped[str] = mapped_column(String(32))  # inbound_message | outbound_send
+    payload: Mapped[dict] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", index=True
+    )  # pending | processing | done | dead_letter
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    business_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("businesses.id"), nullable=True, index=True
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
