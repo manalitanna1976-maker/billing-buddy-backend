@@ -18,6 +18,21 @@ class Settings(BaseSettings):
     # app/security_crypto.py.
     secret_encryption_key: str
 
+    # --- WhatsApp invoice-drafting feature ---
+    anthropic_api_key: str
+    whatsapp_app_secret: str          # Meta app secret, for X-Hub-Signature-256
+    whatsapp_verify_token: str        # the GET-handshake token
+    whatsapp_api_version: str = "v21.0"
+    whatsapp_graph_base_url: str = "https://graph.facebook.com"
+    whatsapp_parser_model: str = "claude-sonnet-5"
+    whatsapp_message_max_bytes: int = 2048
+    whatsapp_rate_per_sender: int = 20            # per 15 min
+    whatsapp_rate_per_business: int = 100         # per 15 min
+    whatsapp_job_max_attempts: int = 5
+    whatsapp_job_stale_claim_seconds: int = 300
+    whatsapp_conversation_ttl_minutes: int = 30
+    deadletter_webhook_url: str | None = None
+
     @field_validator("secret_encryption_key")
     @classmethod
     def _validate_fernet_keys(cls, v: str) -> str:

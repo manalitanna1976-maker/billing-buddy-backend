@@ -3,6 +3,9 @@ import os
 os.environ.setdefault("DATABASE_URL", "postgresql+psycopg://billing:billing@localhost:5544/billing_buddy_test")
 os.environ.setdefault("JWT_SECRET", "test-secret")
 os.environ.setdefault("SECRET_ENCRYPTION_KEY", "qdEOcT2pkbVQ63tsXIEv6m5l0WILEJ_gMBWTm-_NHyE=")
+os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
+os.environ.setdefault("WHATSAPP_APP_SECRET", "test-app-secret")
+os.environ.setdefault("WHATSAPP_VERIFY_TOKEN", "test-verify-token")
 
 import pytest
 from fastapi.testclient import TestClient
