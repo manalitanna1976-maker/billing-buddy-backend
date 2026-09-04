@@ -19,6 +19,7 @@ dependencies = [
     # passwords). Pin bcrypt below that break until passlib ships a fix.
     "bcrypt<4.1",
     "python-multipart>=0.0.12",
+    "cryptography>=43",
     "weasyprint>=62",
     "jinja2>=3.1",
 ]

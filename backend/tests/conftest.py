@@ -2,6 +2,7 @@ import os
 
 os.environ.setdefault("DATABASE_URL", "postgresql+psycopg://billing:billing@localhost:5544/billing_buddy_test")
 os.environ.setdefault("JWT_SECRET", "test-secret")
+os.environ.setdefault("SECRET_ENCRYPTION_KEY", "qdEOcT2pkbVQ63tsXIEv6m5l0WILEJ_gMBWTm-_NHyE=")
 
 import pytest
 from fastapi.testclient import TestClient
