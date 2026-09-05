@@ -61,7 +61,37 @@ def _ip_key(ip: str) -> str:
     return f"ip:{ip}"
 
 
-def _count_within(db: Session, bucket_key: str, window_seconds: int) -> int:
+def _global_prune(db: Session) -> None:
+    """Delete every row older than the longest configured window. A single
+    global delete run on every write, so orphan buckets that are never
+    retried still age out without a scheduler.
+    """
+    cutoff = datetime.utcnow() - timedelta(
+        seconds=max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS)
+    )
+    db.execute(delete(RateLimitEvent).where(RateLimitEvent.occurred_at <= cutoff))
+
+
+# --- generic sliding-window seam -------------------------------------------------
+# `record_event` / `count_in_window` are bucket-key agnostic: the login helpers
+# below are just one caller (email + IP buckets); a future WhatsApp worker can
+# reuse the same table and semantics for per-sender / per-business throttling.
+
+
+def record_event(db: Session, bucket_key: str) -> None:
+    """Insert one event row for `bucket_key`, run the global time-based prune,
+    and commit the caller's session.
+    """
+    db.add(RateLimitEvent(bucket_key=bucket_key, occurred_at=datetime.utcnow()))
+    db.flush()
+    _global_prune(db)
+    db.commit()
+
+
+def count_in_window(db: Session, bucket_key: str, window_seconds: int) -> int:
+    """Number of events recorded for `bucket_key` within the last
+    `window_seconds` seconds.
+    """
     threshold = datetime.utcnow() - timedelta(seconds=window_seconds)
     return db.execute(
         select(func.count())
@@ -75,30 +105,21 @@ def _count_within(db: Session, bucket_key: str, window_seconds: int) -> int:
 
 def is_login_rate_limited(db: Session, email: str, ip: str) -> bool:
     """True if this email or this IP has already hit its failed-attempt cap."""
-    if _count_within(db, _email_key(email), EMAIL_WINDOW_SECONDS) >= EMAIL_MAX_ATTEMPTS:
+    if count_in_window(db, _email_key(email), EMAIL_WINDOW_SECONDS) >= EMAIL_MAX_ATTEMPTS:
         return True
-    if _count_within(db, _ip_key(ip), IP_WINDOW_SECONDS) >= IP_MAX_ATTEMPTS:
+    if count_in_window(db, _ip_key(ip), IP_WINDOW_SECONDS) >= IP_MAX_ATTEMPTS:
         return True
     return False
 
 
 def record_failed_login(db: Session, email: str, ip: str) -> None:
     """Record one failed attempt against both the email and IP buckets, then
-    prune every row older than the longest window (a single global delete, so
-    orphan buckets that are never retried still age out).
+    prune every row older than the longest window.
 
     Commits the caller's session.
     """
-    now = datetime.utcnow()
-    db.add(RateLimitEvent(bucket_key=_email_key(email), occurred_at=now))
-    db.add(RateLimitEvent(bucket_key=_ip_key(ip), occurred_at=now))
-    db.flush()
-
-    cutoff = datetime.utcnow() - timedelta(
-        seconds=max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS)
-    )
-    db.execute(delete(RateLimitEvent).where(RateLimitEvent.occurred_at <= cutoff))
-    db.commit()
+    record_event(db, _email_key(email))
+    record_event(db, _ip_key(ip))
 
 
 def reset_failed_logins(db: Session, email: str) -> None:
