@@ -42,6 +42,11 @@ def upgrade() -> None:
         op.f('ix_whatsapp_connections_phone_number_id'),
         'whatsapp_connections', ['phone_number_id'], unique=False,
     )
+    op.create_index(
+        'ux_whatsapp_connections_phone_number_id_active',
+        'whatsapp_connections', ['phone_number_id'], unique=True,
+        postgresql_where=sa.text("status = 'active'"),
+    )
 
     op.create_table(
         'whatsapp_authorized_senders',
@@ -149,6 +154,7 @@ def downgrade() -> None:
     )
     op.drop_table('whatsapp_authorized_senders')
 
+    op.drop_index('ux_whatsapp_connections_phone_number_id_active', table_name='whatsapp_connections')
     op.drop_index(op.f('ix_whatsapp_connections_phone_number_id'), table_name='whatsapp_connections')
     op.drop_index(op.f('ix_whatsapp_connections_business_id'), table_name='whatsapp_connections')
     op.drop_table('whatsapp_connections')

@@ -3,7 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
-    Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text,
+    Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -164,9 +164,28 @@ class InvoiceLineItem(Base):
 
 
 class WhatsAppConnection(Base):
-    """Per-business WhatsApp Business API connection. One row per business."""
+    """Per-business WhatsApp Business API connection. One row per business.
+
+    ``phone_number_id`` is a plain (non-unique) index, not a unique one --
+    a `disconnected` row is allowed to keep a `phone_number_id` that a
+    different business's `active` connection later claims (Meta can
+    reassign a number). The partial unique index below is what actually
+    enforces the invariant that matters: at most one *active* connection
+    per `phone_number_id`, ever. Without it, nothing stops a second
+    business claiming the same number while it's still active elsewhere,
+    and the webhook's connection lookup (`status='active'` filter) would
+    then find two rows and crash with `MultipleResultsFound`.
+    """
 
     __tablename__ = "whatsapp_connections"
+    __table_args__ = (
+        Index(
+            "ux_whatsapp_connections_phone_number_id_active",
+            "phone_number_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     business_id: Mapped[uuid.UUID] = mapped_column(

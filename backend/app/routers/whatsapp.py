@@ -84,12 +84,33 @@ async def post_webhook(request: Request, db: Session = Depends(get_db)):
             if not phone_number_id:
                 continue
 
-            connection = db.execute(
-                select(WhatsAppConnection).where(
-                    WhatsAppConnection.phone_number_id == phone_number_id,
-                    WhatsAppConnection.status == "active",
+            # A partial unique index (`ux_whatsapp_connections_phone_number_id_active`)
+            # enforces at most one active connection per phone_number_id at the DB
+            # level. This is belt-and-suspenders for that invariant: use `.all()`
+            # rather than `scalar_one_or_none()` so a violation (e.g. mid-migration-
+            # rollout, or the constraint somehow bypassed) logs loudly and picks the
+            # most-recent match deterministically, instead of crashing this public,
+            # unauthenticated endpoint with `MultipleResultsFound`.
+            candidates = (
+                db.execute(
+                    select(WhatsAppConnection)
+                    .where(
+                        WhatsAppConnection.phone_number_id == phone_number_id,
+                        WhatsAppConnection.status == "active",
+                    )
+                    .order_by(WhatsAppConnection.created_at.desc())
                 )
-            ).scalar_one_or_none()
+                .scalars()
+                .all()
+            )
+            if len(candidates) > 1:
+                logger.error(
+                    "whatsapp webhook: %d active connections found for phone_number_id=%s "
+                    "(expected at most 1) -- using the most recently created",
+                    len(candidates),
+                    phone_number_id,
+                )
+            connection = candidates[0] if candidates else None
             if connection is None:
                 logger.info(
                     "whatsapp webhook: no active connection for phone_number_id=%s",
@@ -202,10 +223,11 @@ def _mark_seen(db: Session, wa_message_id: str) -> bool:
     so a replay never raises IntegrityError.
 
     Detects the outcome via ``RETURNING`` rather than ``result.rowcount``:
-    the psycopg driver reports ``rowcount == -1`` for this statement shape
-    regardless of whether a row was actually inserted, so rowcount can't
-    distinguish "inserted" from "conflicted" here -- but the presence of a
-    returned row can.
+    with this project's psycopg driver, a fresh insert reports
+    ``rowcount == 1`` but the conflict/no-op case reports ``rowcount == -1``
+    instead of the ``0`` the brief's `result.rowcount == 0` check assumed --
+    so rowcount alone can't reliably distinguish "inserted" from
+    "conflicted" here. The presence of a returned row can.
     """
     stmt = (
         insert(WhatsAppMessageLog)
