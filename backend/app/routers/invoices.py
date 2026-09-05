@@ -8,7 +8,11 @@ from app.db import get_db
 from app.deps import get_current_business
 from app.models import Business, Customer, Invoice
 from app.schemas.invoice import InvoiceCreate, InvoiceListItem, InvoiceRead
-from app.services.invoices import apply_totals_and_items, create_invoice_for_business
+from app.services.invoices import (
+    CustomerNotFoundError,
+    apply_totals_and_items,
+    create_invoice_for_business,
+)
 from app.services.pdf import render_invoice_pdf
 
 router = APIRouter(prefix="/invoices", tags=["invoices"])
@@ -70,7 +74,10 @@ def create_invoice(
     business: Business = Depends(get_current_business),
     db: Session = Depends(get_db),
 ):
-    invoice = create_invoice_for_business(db, business, body)
+    try:
+        invoice = create_invoice_for_business(db, business, body)
+    except CustomerNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
     db.commit()
     db.refresh(invoice)
     return invoice

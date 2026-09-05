@@ -1,12 +1,20 @@
 import uuid
 
-from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.models import Business, Customer, Invoice, InvoiceLineItem
 from app.schemas.invoice import InvoiceCreate
 from app.services.gst import LineItemInput, compute_invoice_totals, line_taxable_value
 from app.services.numbering import next_invoice_number
+
+
+class CustomerNotFoundError(Exception):
+    """Raised by _resolve_customer / create_invoice_for_business when the
+    referenced customer does not exist or does not belong to the business.
+
+    Domain-level so non-HTTP callers (e.g. the WhatsApp worker) can handle it
+    without depending on FastAPI. The web route translates it to HTTP 404.
+    """
 
 
 def apply_totals_and_items(invoice: Invoice, body: InvoiceCreate, business: Business, customer: Customer) -> None:
@@ -54,7 +62,7 @@ def apply_totals_and_items(invoice: Invoice, body: InvoiceCreate, business: Busi
 def _resolve_customer(db: Session, business: Business, customer_id: uuid.UUID) -> Customer:
     customer = db.get(Customer, customer_id)
     if customer is None or customer.business_id != business.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
+        raise CustomerNotFoundError("Customer not found")
     return customer
 
 

@@ -1,11 +1,10 @@
 import datetime as dt
 
 import pytest
-from fastapi import HTTPException
 
 from app.models import Business, Customer
 from app.schemas.invoice import InvoiceCreate
-from app.services.invoices import create_invoice_for_business
+from app.services.invoices import CustomerNotFoundError, create_invoice_for_business
 
 
 def _seed(db):
@@ -50,9 +49,8 @@ def test_create_invoice_for_business_rejects_foreign_customer(db_session):
         invoice_date=dt.date(2026, 8, 17),
         line_items=[{"product_name": "X", "qty": 1, "price": 1, "gst_rate": 0}],
     )
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(CustomerNotFoundError):
         create_invoice_for_business(db_session, biz, body)
-    assert exc.value.status_code == 404
 
 
 def test_create_invoice_for_business_does_not_commit(db_session):
