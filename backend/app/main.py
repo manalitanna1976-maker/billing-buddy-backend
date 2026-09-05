@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
-from app.routers import auth, bank_accounts, business, customers, invoices
+from app.routers import auth, bank_accounts, business, customers, invoices, whatsapp
 
 settings = get_settings()
 
@@ -24,6 +24,7 @@ app.include_router(business.router)
 app.include_router(bank_accounts.router)
 app.include_router(customers.router)
 app.include_router(invoices.router)
+app.include_router(whatsapp.router)
 
 Path(get_settings().upload_dir).mkdir(exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=get_settings().upload_dir), name="uploads")
