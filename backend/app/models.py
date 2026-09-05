@@ -257,7 +257,14 @@ class WhatsAppMessageLog(Base):
 
 
 class WhatsAppJob(Base):
-    """Durable work queue for inbound/outbound WhatsApp processing."""
+    """Durable work queue for inbound/outbound WhatsApp processing.
+
+    `payload` may contain raw inbound message text (customer names, amounts,
+    GSTIN/PAN). Rows are hard-deleted 24h after `processed_at` by the worker's
+    retention sweep (Task B6) -- do not treat this table as durable storage,
+    and never return `payload` verbatim through an API (see the C2 dead-letter
+    endpoint's redacted view).
+    """
 
     __tablename__ = "whatsapp_jobs"
     __table_args__ = (Index("ix_wa_jobs_status_created", "status", "created_at"),)

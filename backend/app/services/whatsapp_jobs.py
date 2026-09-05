@@ -17,7 +17,8 @@ webhook failure must never take down the caller (`fail` itself must not
 raise), so any exception there is caught and logged, never re-raised.
 
 Transaction contract: `enqueue`, `claim_next`, `complete`, and `fail` each
-commit the caller's session.
+commit the caller's session. `build` does NOT commit -- the caller owns the
+transaction (the webhook folds the job insert into its per-message tx).
 """
 
 import logging
@@ -42,11 +43,46 @@ def enqueue(
     payload: dict,
     business_id: uuid.UUID | None = None,
 ) -> WhatsAppJob:
-    """Insert a new pending job and commit the caller's session."""
-    job = WhatsAppJob(type=type, payload=payload, status="pending", business_id=business_id)
-    db.add(job)
+    """Insert a new pending job and commit the caller's session.
+
+    `payload` may contain raw inbound message text (customer names, amounts,
+    GSTIN/PAN). Rows are hard-deleted 24h after `processed_at` by the worker's
+    retention sweep (Task B6) -- do not treat this table as durable storage,
+    and never return `payload` verbatim through an API (see the C2 dead-letter
+    endpoint's redacted view).
+
+    When `business_id` is not passed, it is derived from `payload["business_id"]`
+    if present, so a re-enqueued `outbound_send` job stays visible on the C2
+    admin endpoint; a job that still ends up with no `business_id` is logged.
+    """
+    job = build(db, type, payload, business_id)
     db.commit()
     db.refresh(job)
+    return job
+
+
+def build(
+    db: Session,
+    type: str,
+    payload: dict,
+    business_id: uuid.UUID | None = None,
+) -> WhatsAppJob:
+    """Add a pending job to the session but do NOT commit -- the caller owns the
+    transaction. The webhook uses this to fold the job insert into the same
+    transaction as its dedup row + rate-limit events (one commit per message).
+
+    Shares `enqueue`'s `business_id`-from-payload derivation and no-business_id
+    warning.
+    """
+    if business_id is None and isinstance(payload, dict) and payload.get("business_id"):
+        try:
+            business_id = uuid.UUID(str(payload["business_id"]))
+        except (ValueError, TypeError):
+            business_id = None
+    if business_id is None:
+        logger.warning("whatsapp job enqueued with no business_id (type=%s)", type)
+    job = WhatsAppJob(type=type, payload=payload, status="pending", business_id=business_id)
+    db.add(job)
     return job
 
 
@@ -100,27 +136,45 @@ def fail(db: Session, job: WhatsAppJob, error: str) -> None:
     alerts. Commits the caller's session. Never raises.
     """
     settings = config.get_settings()
+    # The failed handler may have left the session's transaction aborted (a bad
+    # DB write before it raised). Roll it back so our own commit can run, then
+    # re-fetch the job -- rollback expires/detaches the instance we were handed.
+    db.rollback()
+    job = db.get(WhatsAppJob, job.id)
+    if job is None:
+        return
     job.last_error = error
     if job.attempts >= settings.whatsapp_job_max_attempts:
         job.status = "dead_letter"
+        # Snapshot the fields _alert needs BEFORE the commit, so _alert never
+        # triggers a lazy reload / DetachedInstanceError on an expired instance.
+        alert_snapshot = {
+            "id": job.id,
+            "type": job.type,
+            "business_id": job.business_id,
+            "last_error": job.last_error,
+        }
         db.commit()
-        _alert(job)
+        _alert(alert_snapshot)
     else:
         job.status = "pending"
         db.commit()
 
 
-def _alert(job: WhatsAppJob) -> None:
+def _alert(snapshot: dict) -> None:
     """Best-effort dead-letter notification. Always logs; also POSTs to the
     configured webhook when set. Any webhook failure is caught and logged --
     this function must never raise, since it runs on the failure path.
+
+    Takes a plain dict snapshot (not the ORM object) so it can't trigger a
+    reload on an expired/detached instance.
     """
     logger.error(
         "whatsapp job dead-lettered id=%s type=%s business=%s: %s",
-        job.id,
-        job.type,
-        job.business_id,
-        job.last_error,
+        snapshot["id"],
+        snapshot["type"],
+        snapshot["business_id"],
+        snapshot["last_error"],
     )
 
     webhook_url = config.get_settings().deadletter_webhook_url
@@ -131,12 +185,12 @@ def _alert(job: WhatsAppJob) -> None:
         httpx.post(
             webhook_url,
             json={
-                "id": str(job.id),
-                "type": job.type,
-                "business_id": str(job.business_id) if job.business_id else None,
-                "last_error": job.last_error,
+                "id": str(snapshot["id"]),
+                "type": snapshot["type"],
+                "business_id": str(snapshot["business_id"]) if snapshot["business_id"] else None,
+                "last_error": snapshot["last_error"],
             },
             timeout=_WEBHOOK_TIMEOUT_SECONDS,
         )
     except Exception:
-        logger.exception("dead-letter webhook POST failed for job id=%s", job.id)
+        logger.exception("dead-letter webhook POST failed for job id=%s", snapshot["id"])

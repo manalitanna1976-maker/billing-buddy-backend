@@ -246,6 +246,19 @@ def test_upload_media_raises_on_non_2xx(monkeypatch):
         upload_media(OutboundConn("PN", "t"), b"x", "f.pdf", "application/pdf")
 
 
+def test_send_text_unexpected_2xx_shape_raises_send_error(monkeypatch):
+    _mock_client(monkeypatch, lambda r: httpx.Response(200, json={}))
+    with pytest.raises(WhatsAppSendError) as exc:
+        send_text(OutboundConn("PN", "t"), "+9199", "x")
+    assert "unexpected response shape" in exc.value.body
+
+
+def test_upload_media_unexpected_2xx_shape_raises_send_error(monkeypatch):
+    _mock_client(monkeypatch, lambda r: httpx.Response(200, json={}))
+    with pytest.raises(WhatsAppSendError):
+        upload_media(OutboundConn("PN", "t"), b"x", "f.pdf", "application/pdf")
+
+
 def test_send_error_message_has_no_token(monkeypatch):
     _mock_client(monkeypatch, lambda r: httpx.Response(400, text="oops"))
     with pytest.raises(WhatsAppSendError) as exc:

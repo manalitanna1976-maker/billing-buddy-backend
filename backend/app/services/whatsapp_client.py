@@ -121,7 +121,12 @@ def _post_message(conn: OutboundConn, payload: dict) -> str:
         )
     if resp.status_code // 100 != 2:
         raise WhatsAppSendError(resp.status_code, resp.text)
-    return resp.json()["messages"][0]["id"]
+    try:
+        return resp.json()["messages"][0]["id"]
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        raise WhatsAppSendError(
+            resp.status_code, f"unexpected response shape: {resp.text[:500]}"
+        ) from e
 
 
 def send_text(conn: OutboundConn, to_e164: str, body: str) -> str:
@@ -209,4 +214,9 @@ def upload_media(
         )
     if resp.status_code // 100 != 2:
         raise WhatsAppSendError(resp.status_code, resp.text)
-    return resp.json()["id"]
+    try:
+        return resp.json()["id"]
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        raise WhatsAppSendError(
+            resp.status_code, f"unexpected response shape: {resp.text[:500]}"
+        ) from e

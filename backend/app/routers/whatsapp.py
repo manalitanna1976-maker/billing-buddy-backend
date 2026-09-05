@@ -27,10 +27,11 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from app import rate_limit
 from app.config import get_settings
 from app.db import get_db
 from app.models import WhatsAppAuthorizedSender, WhatsAppConnection, WhatsAppMessageLog
-from app.rate_limit import count_in_window, record_event
+from app.rate_limit import count_in_window
 from app.schemas.whatsapp import Message, WebhookPayload
 from app.services import whatsapp_jobs
 from app.services.whatsapp_client import verify_challenge, verify_webhook_signature
@@ -39,9 +40,21 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/whatsapp", tags=["whatsapp"])
 
-_RATE_WINDOW_SECONDS = 900  # 15 minutes
+# Meta signs the raw body before we can trust it, so the buffer below is read
+# before auth -- cap it. A real Meta webhook batch is a few KB.
+_MAX_BODY_BYTES = 512_000
+# A real Meta change carries a handful of messages; anything past this is abuse.
+_MAX_MESSAGES_PER_CHANGE = 50
 _TOO_LONG_REPLY = "That message is too long — please use the web app for this invoice."
 _UNSUPPORTED_TYPE_REPLY = "I can only read typed invoice details."
+
+
+def _mask_sender(sender: str) -> str:
+    """Enough of a sender's E.164 number to correlate a support ticket without
+    putting full phone numbers in logs."""
+    if len(sender) <= 7:
+        return "***"
+    return sender[:3] + "***" + sender[-4:]
 
 
 @router.get("/webhook")
@@ -58,6 +71,15 @@ def get_webhook(
 
 @router.post("/webhook")
 async def post_webhook(request: Request, db: Session = Depends(get_db)):
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > _MAX_BODY_BYTES:
+                logger.warning("whatsapp webhook body over cap (content-length=%s)", content_length)
+                return Response(status_code=413)
+        except ValueError:
+            pass  # unparseable header -- fall through; the body read is still bounded server-side
+
     raw_body = await request.body()
     signature = request.headers.get("X-Hub-Signature-256")
     if not verify_webhook_signature(raw_body, signature):
@@ -118,23 +140,27 @@ async def post_webhook(request: Request, db: Session = Depends(get_db)):
                 )
                 continue
 
-            for message in value.messages:
+            for message in value.messages[:_MAX_MESSAGES_PER_CHANGE]:
                 _handle_message(db, connection, message)
 
     return {"status": "ok"}
 
 
 def _handle_message(db: Session, connection: WhatsAppConnection, message: Message) -> None:
+    """Decide whether one inbound message is eligible for the worker and, if so,
+    enqueue its job. All the DB work for a message -- the dedup row, the job
+    row, and the rate-limit event rows -- goes into ONE transaction with ONE
+    commit, so a crash can never leave a dedup row committed without its job
+    (which would silently drop the message on Meta's redelivery).
+    """
     wa_message_id = message.id
     sender = message.from_
     if not wa_message_id or not sender:
         return
 
-    if not _mark_seen(db, wa_message_id):
-        logger.info("whatsapp webhook: duplicate wa_message_id=%s, skipping", wa_message_id)
-        return
-
     business_id = connection.business_id
+
+    # Authorization -- read-only, no writes.
     authorized = db.execute(
         select(WhatsAppAuthorizedSender).where(
             WhatsAppAuthorizedSender.business_id == business_id,
@@ -143,48 +169,77 @@ def _handle_message(db: Session, connection: WhatsAppConnection, message: Messag
     ).scalar_one_or_none()
     if authorized is None:
         logger.info(
-            "whatsapp webhook: unauthorized sender for business_id=%s, no reply sent",
+            "whatsapp webhook: unauthorized sender %s for business_id=%s, no reply sent",
+            _mask_sender(sender),
             business_id,
         )
+        db.rollback()
         return
 
     settings = get_settings()
+    window = rate_limit.WHATSAPP_WINDOW_SECONDS
     business_bucket = f"wa:business:{business_id}"
     sender_bucket = f"wa:sender:{sender}"
-    if count_in_window(db, business_bucket, _RATE_WINDOW_SECONDS) >= settings.whatsapp_rate_per_business:
-        logger.info("whatsapp webhook: business %s rate-limited", business_id)
-        return
-    if count_in_window(db, sender_bucket, _RATE_WINDOW_SECONDS) >= settings.whatsapp_rate_per_sender:
-        logger.info("whatsapp webhook: sender %s rate-limited", sender)
-        return
-    record_event(db, business_bucket)
-    record_event(db, sender_bucket)
 
+    # Rate-limit CHECK -- read-only. Over cap => skip with no writes at all.
+    if count_in_window(db, business_bucket, window) >= settings.whatsapp_rate_per_business:
+        logger.info("whatsapp webhook: business %s rate-limited", business_id)
+        db.rollback()
+        return
+    if count_in_window(db, sender_bucket, window) >= settings.whatsapp_rate_per_sender:
+        logger.info("whatsapp webhook: sender %s rate-limited", _mask_sender(sender))
+        db.rollback()
+        return
+
+    # Dedup insert -- no commit yet.
+    if not _mark_seen(db, wa_message_id):
+        logger.info("whatsapp webhook: duplicate wa_message_id=%s, skipping", wa_message_id)
+        db.rollback()
+        return
+
+    job_spec = _job_for_message(message, business_id, sender, wa_message_id, settings)
+    if job_spec is None:
+        # Nothing worth handing the worker (e.g. an empty text body). The dedup
+        # row still stands so Meta's redelivery is a no-op; commit just that.
+        logger.info("whatsapp webhook: nothing to enqueue for wa_message_id=%s", wa_message_id)
+        db.commit()
+        return
+
+    job_type, payload = job_spec
+    whatsapp_jobs.build(db, job_type, payload, business_id=business_id)
+    rate_limit.add_events(db, [business_bucket, sender_bucket])
+    db.commit()
+
+
+def _job_for_message(
+    message: Message,
+    business_id,
+    sender: str,
+    wa_message_id: str,
+    settings,
+) -> tuple[str, dict] | None:
+    """Map an inbound message to the (job_type, payload) to enqueue, or None if
+    the message is a no-op (empty text body -- a doomed parser call)."""
     msg_type = message.type
     if msg_type == "text":
         text_body = message.text.body if message.text else None
         text_body = text_body or ""
+        if not text_body.strip():
+            return None
         if len(text_body.encode("utf-8")) > settings.whatsapp_message_max_bytes:
-            whatsapp_jobs.enqueue(
-                db,
-                "outbound_send",
-                {"kind": "text", "to": sender, "business_id": str(business_id), "body": _TOO_LONG_REPLY},
-                business_id=business_id,
-            )
-            return
-        whatsapp_jobs.enqueue(
-            db,
-            "inbound_message",
-            {
-                "business_id": str(business_id),
-                "sender": sender,
-                "wa_message_id": wa_message_id,
+            return "outbound_send", {
                 "kind": "text",
-                "text": text_body,
-            },
-            business_id=business_id,
-        )
-        return
+                "to": sender,
+                "business_id": str(business_id),
+                "body": _TOO_LONG_REPLY,
+            }
+        return "inbound_message", {
+            "business_id": str(business_id),
+            "sender": sender,
+            "wa_message_id": wa_message_id,
+            "kind": "text",
+            "text": text_body,
+        }
 
     button_id = None
     if msg_type == "interactive" and message.interactive and message.interactive.button_reply:
@@ -193,34 +248,29 @@ def _handle_message(db: Session, connection: WhatsAppConnection, message: Messag
         button_id = message.button.payload
 
     if button_id is not None:
-        whatsapp_jobs.enqueue(
-            db,
-            "inbound_message",
-            {
-                "business_id": str(business_id),
-                "sender": sender,
-                "wa_message_id": wa_message_id,
-                "kind": "button",
-                "button_id": button_id,
-            },
-            business_id=business_id,
-        )
-        return
+        return "inbound_message", {
+            "business_id": str(business_id),
+            "sender": sender,
+            "wa_message_id": wa_message_id,
+            "kind": "button",
+            "button_id": button_id,
+        }
 
     # Unsupported message type (image, audio, location, ...).
-    whatsapp_jobs.enqueue(
-        db,
-        "outbound_send",
-        {"kind": "text", "to": sender, "business_id": str(business_id), "body": _UNSUPPORTED_TYPE_REPLY},
-        business_id=business_id,
-    )
+    return "outbound_send", {
+        "kind": "text",
+        "to": sender,
+        "business_id": str(business_id),
+        "body": _UNSUPPORTED_TYPE_REPLY,
+    }
 
 
 def _mark_seen(db: Session, wa_message_id: str) -> bool:
-    """Insert the dedup row. Returns True if this is the first time we've
-    seen this wa_message_id (row inserted), False if it's a replay (conflict,
-    no row inserted). Uses ON CONFLICT DO NOTHING rather than a plain INSERT
-    so a replay never raises IntegrityError.
+    """Insert the dedup row (no commit -- the caller owns the transaction).
+    Returns True if this is the first time we've seen this wa_message_id (row
+    inserted), False if it's a replay (conflict, no row inserted). Uses ON
+    CONFLICT DO NOTHING rather than a plain INSERT so a replay never raises
+    IntegrityError.
 
     Detects the outcome via ``RETURNING`` rather than ``result.rowcount``:
     with this project's psycopg driver, a fresh insert reports
@@ -236,5 +286,4 @@ def _mark_seen(db: Session, wa_message_id: str) -> bool:
         .returning(WhatsAppMessageLog.id)
     )
     row = db.execute(stmt).fetchone()
-    db.commit()
     return row is not None

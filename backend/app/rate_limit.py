@@ -30,11 +30,13 @@ window. That bounds the table regardless of whether any particular email
 is ever retried. `sweep_expired` exposes the same prune with an identical
 predicate for a future worker loop; nothing calls it yet.
 
-Transaction contract: the mutating helpers here (`record_failed_login`,
-`reset_failed_logins`, `sweep_expired`, `reset_all_state`) own their own
-commit -- they call `db.commit()` on the caller's session. Do not call
-them mid-transaction on a session that has other uncommitted work you
-don't want committed.
+Transaction contract: `record_event`, `record_failed_login`,
+`reset_failed_logins`, `sweep_expired`, and `reset_all_state` own their own
+commit -- they call `db.commit()` on the caller's session. `add_events` and
+`count_in_window` do NOT commit -- the caller owns the transaction (this is
+what lets the webhook fold a rate-limit write into the same transaction as
+its dedup + job inserts). Do not call the committing helpers mid-transaction
+on a session that has other uncommitted work you don't want committed.
 """
 
 import hashlib
@@ -50,6 +52,12 @@ EMAIL_WINDOW_SECONDS = 15 * 60
 
 IP_MAX_ATTEMPTS = 30
 IP_WINDOW_SECONDS = 15 * 60
+
+# The WhatsApp webhook reuses the same `rate_limit_events` table for its
+# per-sender / per-business throttling. Keeping its window here (rather than a
+# private constant in the webhook router) means `_global_prune` / `sweep_expired`
+# never age out a row that the webhook's `count_in_window` still needs.
+WHATSAPP_WINDOW_SECONDS = 15 * 60
 
 
 def _email_key(email: str) -> str:
@@ -67,7 +75,7 @@ def _global_prune(db: Session) -> None:
     retried still age out without a scheduler.
     """
     cutoff = datetime.utcnow() - timedelta(
-        seconds=max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS)
+        seconds=max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS, WHATSAPP_WINDOW_SECONDS)
     )
     db.execute(delete(RateLimitEvent).where(RateLimitEvent.occurred_at <= cutoff))
 
@@ -78,13 +86,21 @@ def _global_prune(db: Session) -> None:
 # reuse the same table and semantics for per-sender / per-business throttling.
 
 
+def add_events(db: Session, bucket_keys: list[str]) -> None:
+    """Insert one event row per bucket key and run the global prune. Does NOT
+    commit -- the caller owns the transaction.
+    """
+    for k in bucket_keys:
+        db.add(RateLimitEvent(bucket_key=k, occurred_at=datetime.utcnow()))
+    db.flush()
+    _global_prune(db)
+
+
 def record_event(db: Session, bucket_key: str) -> None:
     """Insert one event row for `bucket_key`, run the global time-based prune,
     and commit the caller's session.
     """
-    db.add(RateLimitEvent(bucket_key=bucket_key, occurred_at=datetime.utcnow()))
-    db.flush()
-    _global_prune(db)
+    add_events(db, [bucket_key])
     db.commit()
 
 
@@ -118,8 +134,8 @@ def record_failed_login(db: Session, email: str, ip: str) -> None:
 
     Commits the caller's session.
     """
-    record_event(db, _email_key(email))
-    record_event(db, _ip_key(ip))
+    add_events(db, [_email_key(email), _ip_key(ip)])
+    db.commit()
 
 
 def reset_failed_logins(db: Session, email: str) -> None:
@@ -139,7 +155,7 @@ def sweep_expired(db: Session) -> int:
     Commits the caller's session.
     """
     cutoff = datetime.utcnow() - timedelta(
-        seconds=max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS)
+        seconds=max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS, WHATSAPP_WINDOW_SECONDS)
     )
     result = db.execute(
         delete(RateLimitEvent).where(RateLimitEvent.occurred_at <= cutoff)

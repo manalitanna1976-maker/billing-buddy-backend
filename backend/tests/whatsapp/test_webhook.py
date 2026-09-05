@@ -244,6 +244,65 @@ def test_status_only_payload_acked_and_ignored(client, db_session):
     assert _jobs() == []
 
 
+def test_oversize_request_body_rejected_413_enqueues_nothing(client, db_session):
+    b = _biz(db_session)
+    _connection(db_session, b.id)
+    _authorize(db_session, b.id, "+911234567890")
+    db_session.commit()
+
+    body = _payload("pn1", frm="+911234567890", text="x" * 600_000, mid="wamid.big")
+    raw = json.dumps(body).encode()
+    resp = client.post(
+        "/whatsapp/webhook",
+        content=raw,
+        headers={"X-Hub-Signature-256": _sig(raw), "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 413
+    assert _jobs() == []
+
+
+def test_empty_text_body_enqueues_nothing(client, db_session):
+    b = _biz(db_session)
+    _connection(db_session, b.id)
+    _authorize(db_session, b.id, "+911234567890")
+    db_session.commit()
+
+    resp = post(client, _payload("pn1", frm="+911234567890", text="   ", mid="wamid.empty"))
+    assert resp.status_code == 200
+    assert _jobs() == []
+
+
+def test_per_business_rate_limit_blocks_after_cap(client, db_session, monkeypatch):
+    from app import config as _config
+
+    lowered = _config.Settings(
+        **{
+            **_config.get_settings().model_dump(),
+            "whatsapp_rate_per_business": 3,
+            "whatsapp_rate_per_sender": 100,
+        }
+    )
+    monkeypatch.setattr("app.routers.whatsapp.get_settings", lambda: lowered)
+
+    b = _biz(db_session)
+    _connection(db_session, b.id)
+    senders = [f"+9112345678{i:02d}" for i in range(5)]
+    for s in senders:
+        _authorize(db_session, b.id, s)
+    db_session.commit()
+
+    for i, s in enumerate(senders[:3]):
+        resp = post(client, _payload("pn1", frm=s, text=f"msg {i}", mid=f"wamid.b{i}"))
+        assert resp.status_code == 200
+    assert len(_jobs()) == 3
+
+    # A distinct sender (well under the per-sender cap) is still blocked once
+    # the shared per-business bucket is full.
+    resp = post(client, _payload("pn1", frm=senders[3], text="over", mid="wamid.bover"))
+    assert resp.status_code == 200
+    assert len(_jobs()) == 3
+
+
 def test_per_sender_rate_limit_blocks_after_cap(client, db_session):
     b = _biz(db_session)
     _connection(db_session, b.id)

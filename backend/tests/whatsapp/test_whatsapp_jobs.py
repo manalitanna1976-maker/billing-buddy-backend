@@ -1,6 +1,7 @@
 import uuid
 
 import pytest
+from sqlalchemy import text
 
 from app import config
 from app.db import SessionLocal
@@ -50,6 +51,60 @@ def test_fail_retries_then_dead_letters(db_session, monkeypatch):
     j = q.claim_next(db_session)
     q.fail(db_session, j, "boom again")
     assert db_session.get(WhatsAppJob, j.id).status == "dead_letter"
+
+
+def test_fail_recovers_from_aborted_transaction(db_session, monkeypatch):
+    # Simulate Phase B's worker: the handler touched the DB badly and raised,
+    # leaving the session's transaction aborted. `fail` must still transition
+    # the job and never leave it stuck in `processing`.
+    monkeypatch.setattr(
+        "app.config.get_settings", lambda: _settings_with(whatsapp_job_max_attempts=5)
+    )
+    q.enqueue(db_session, "inbound_message", {"x": 1})
+    j = q.claim_next(db_session)
+    job_id = j.id
+
+    try:
+        db_session.execute(text("SELECT * FROM no_such_table"))
+    except Exception:
+        pass  # transaction is now aborted
+
+    q.fail(db_session, j, "boom")  # must not raise
+
+    db_session.rollback()
+    row = db_session.get(WhatsAppJob, job_id)
+    assert row.status == "pending"
+    assert row.last_error == "boom"
+
+
+def test_fail_dead_letters_from_aborted_transaction(db_session, monkeypatch):
+    monkeypatch.setattr(
+        "app.config.get_settings", lambda: _settings_with(whatsapp_job_max_attempts=1)
+    )
+    q.enqueue(db_session, "outbound_send", {})
+    j = q.claim_next(db_session)
+    job_id = j.id
+    try:
+        db_session.execute(text("SELECT * FROM no_such_table"))
+    except Exception:
+        pass
+    q.fail(db_session, j, "kaboom")
+    db_session.rollback()
+    assert db_session.get(WhatsAppJob, job_id).status == "dead_letter"
+
+
+def test_enqueue_derives_business_id_from_payload(db_session):
+    from app.models import Business
+
+    biz = Business(name="Acme")
+    db_session.add(biz)
+    db_session.commit()
+
+    job = q.enqueue(
+        db_session, "outbound_send", {"business_id": str(biz.id), "kind": "text"}
+    )
+    row = db_session.get(WhatsAppJob, job.id)
+    assert row.business_id == biz.id
 
 
 def test_complete_marks_done(db_session):

@@ -15,7 +15,10 @@ _REQUIRED = dict(
 
 def test_parser_model_default():
     get_settings.cache_clear()
-    assert get_settings().whatsapp_parser_model == "claude-sonnet-5"
+    try:
+        assert get_settings().whatsapp_parser_model == "claude-sonnet-5"
+    finally:
+        get_settings.cache_clear()
 
 
 def test_missing_whatsapp_app_secret_raises(monkeypatch):
