@@ -108,8 +108,24 @@ def test_run_once_parser_error_dead_letters_after_max_attempts(db_session, monke
     assert inbound.attempts == max_attempts
 
 
-def test_run_once_outbound_send_is_stub_completed(db_session):
+def test_run_once_outbound_send_calls_adapter_and_completes(db_session, monkeypatch):
+    from app.models import WhatsAppConnection, WhatsAppMessageLog
+    from app.security_crypto import encrypt_secret
+    from app.services import whatsapp_client
+
     b = _biz(db_session)
+    db_session.add(
+        WhatsAppConnection(
+            business_id=b.id,
+            phone_number_id="pn1",
+            waba_id="waba-1",
+            access_token_encrypted=encrypt_secret("tok"),
+            status="active",
+        )
+    )
+    db_session.flush()
+    monkeypatch.setattr(whatsapp_client, "send_text", lambda conn, to, body: "wamid.out")
+
     job = jobs.enqueue(
         db_session,
         "outbound_send",
@@ -120,3 +136,21 @@ def test_run_once_outbound_send_is_stub_completed(db_session):
 
     db_session.expire_all()
     assert db_session.get(WhatsAppJob, job.id).status == "done"
+    logs = db_session.query(WhatsAppMessageLog).all()
+    assert len(logs) == 1 and logs[0].direction == "out"
+
+
+def test_run_once_outbound_send_no_connection_retries(db_session):
+    b = _biz(db_session)
+    job = jobs.enqueue(
+        db_session,
+        "outbound_send",
+        {"kind": "text", "to": "+919000000001", "business_id": str(b.id), "body": "hi"},
+    )
+
+    assert worker.run_once(db_session) is True
+
+    db_session.expire_all()
+    reloaded = db_session.get(WhatsAppJob, job.id)
+    assert reloaded.status == "pending"
+    assert reloaded.last_error is not None
