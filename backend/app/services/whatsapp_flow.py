@@ -27,8 +27,10 @@ branch we gate strictly on ``draft_payload["gaps"]`` being empty plus every line
 carrying a positive qty/price and a GST rate -- never on an absence of
 exceptions (``to_invoice_create`` does not raise on an empty draft).
 
-``handle_confirm`` (the confirm -> invoice-create path) is Task B5; this module
-ships a stub that raises ``NotImplementedError``.
+``handle_confirm`` (the confirm -> invoice-create path, Task B5) is the one
+exception to the "never commits" contract: it makes its own commits in a
+deliberate order so the confirm transition is *idempotent by construction* --
+see its docstring.
 """
 
 from __future__ import annotations
@@ -38,10 +40,11 @@ from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.orm import Session
 
-from app.models import Business
+from app.models import Business, Customer
 from app.services import whatsapp_conversations as conv_store
 from app.services.gst import LineItemInput, compute_invoice_totals
 from app.services.invoice_ai_parser import parse_message
+from app.services.invoices import CustomerNotFoundError, create_invoice_for_business
 from app.services.whatsapp_customer_lookup import Ambiguous, Matched, NotFound, resolve
 
 _EXPIRED_STATES = {"awaiting_confirm", "confirmed"}
@@ -100,26 +103,49 @@ def handle_inbound(db: Session, job_payload: dict) -> list[dict]:
     return _handle_text(db, job_payload, conv, business, sender, business_id)
 
 
+def _reset_to_fresh_draft(conv) -> None:
+    """Wipe a finished conversation back to an empty ``collecting`` draft.
+
+    Clearing ``invoice_id`` / ``last_result_payload`` is essential, not
+    cosmetic: ``handle_confirm``'s first check treats a set ``invoice_id`` as a
+    permanent "already done" latch. Leaving it set on any path that starts a new
+    draft would block this ``(business, sender)`` from ever creating a second
+    invoice and make the next Confirm re-send the *first* invoice's stale
+    payload / PDF.
+    """
+    conv.draft_payload = {}
+    conv.state = "collecting"
+    conv.invoice_id = None
+    conv.last_result_payload = None
+
+
 def _handle_button(db, job_payload, conv, business, sender, business_id) -> list[dict]:
     button_id = job_payload.get("button_id")
     if button_id == "wa_confirm":
         return handle_confirm(db, conv, business)
     # "wa_edit" or anything unrecognised -> back to collecting.
-    conv.state = "collecting"
+    if conv.invoice_id is not None:
+        # An Edit tap after an invoice was already created (a stale button on a
+        # confirmed conv, possibly still inside its TTL) means "start over" --
+        # clear the latch so the next dictation can confirm a fresh invoice.
+        _reset_to_fresh_draft(conv)
+    else:
+        # A mid-draft Edit on an awaiting_confirm conv: KEEP the partial draft so
+        # the owner can amend it -- that's the point of Edit.
+        conv.state = "collecting"
     return [_text(sender, business_id, _MSG_EDIT)]
 
 
 def _handle_text(db, job_payload, conv, business, sender, business_id) -> list[dict]:
     text = job_payload["text"]
 
-    # A finished conversation (invoice made, or expired/abandoned) starts fresh:
-    # wipe the stale draft before parsing so merge_draft can't carry old
-    # line_items into the new one. `confirmed` is left alone -- that transition
-    # is B5's to own.
-    # TODO(B5): decide reset behaviour for a `confirmed` conversation.
-    if conv.state == "terminal":
-        conv.draft_payload = {}
-        conv.state = "collecting"
+    # A finished conversation starts fresh: wipe the stale draft AND the
+    # previous invoice's result before parsing. This covers both `terminal`
+    # (invoice made, or expired/abandoned) AND `confirmed` -- a post-confirm
+    # follow-up text ("ok thanks") must begin a genuinely new draft, never
+    # re-arm the frozen one.
+    if conv.state in ("terminal", "confirmed"):
+        _reset_to_fresh_draft(conv)
 
     draft = parse_message(text, conv.draft_payload)
     conv_store.merge_draft(conv, draft)
@@ -192,8 +218,8 @@ def _first_gap_question(payload: dict) -> str | None:
     """Return one targeted question for the first outstanding gap, or ``None``
     if the draft is ready for a confirm prompt.
 
-    Ready == ``gaps`` empty AND >=1 line item AND every line has a positive
-    qty/price and a non-null GST rate.
+    Ready == ``gaps`` empty AND >=1 line item AND every line has a non-empty
+    product name, a positive qty/price and a non-null GST rate.
     """
     gaps = list(payload.get("gaps") or [])
     if gaps:
@@ -204,7 +230,10 @@ def _first_gap_question(payload: dict) -> str | None:
         return "What are you invoicing? Send the item, quantity and price."
 
     for li in line_items:
-        name = li.get("product_name") or "that item"
+        raw_name = li.get("product_name")
+        if raw_name is None or not str(raw_name).strip():
+            return "What are you invoicing? Send the item, quantity and price."
+        name = raw_name
         qty = _dec(li.get("qty"))
         price = _dec(li.get("price"))
         gst = _dec(li.get("gst_rate"))
@@ -250,5 +279,115 @@ def _preview_grand_total(business, customer, payload: dict) -> Decimal:
 
 
 def handle_confirm(db: Session, conv, business) -> list[dict]:
-    """Confirm -> invoice-create path. Implemented in Task B5."""
-    raise NotImplementedError("Task B5")
+    """Owner tapped *Confirm* -> create the invoice. Idempotent by construction.
+
+    Unlike the rest of this module (which never commits), ``handle_confirm``
+    makes its OWN commits in a deliberate sequence -- that sequence *is* the
+    idempotency mechanism:
+
+    1. ``conv.invoice_id is not None`` -> the invoice already exists. Idempotent
+       re-send: return the stored ``last_result_payload`` (or ``[]`` if somehow
+       unset). This is checked FIRST, regardless of ``state`` -- ``invoice_id``
+       being set is the authoritative "already done" signal, so a re-armed
+       conversation can never mint a second invoice.
+    2. ``state == "confirmed"`` with ``invoice_id`` still None -> a concurrent
+       worker committed the state transition (step 3c) but has not yet
+       committed the invoice. Do nothing and return ``[]``; that worker will
+       send the result.
+    3. ``state`` is neither of the above and not ``awaiting_confirm`` (e.g.
+       ``collecting`` / ``terminal``) -> a buttons re-ask.
+    4. ``state == "awaiting_confirm"`` (the real path):
+       a. re-fetch the customer; gone / not ours -> ``terminal`` + commit.
+       b. build the ``InvoiceCreate`` from the frozen draft.
+       c. ``state = "confirmed"``; **commit before creating** so a crash
+          mid-create (or a concurrent second Confirm) lands in case 2 and
+          does nothing.
+       d. create the invoice (flush, no commit), set ``invoice_id`` +
+          ``last_result_payload``, then ONE commit -- the invoice row and the
+          conversation fields land atomically. A failure anywhere before that
+          commit leaves NO invoice and NO ``invoice_id``: no orphan state.
+       e. return ``[last_result_payload]``.
+
+    ``run_once``'s trailing commit then only persists ``job.status="done"``. A
+    crash after step 4d's commit but before that -> the inbound job is
+    stale-reclaimed, ``handle_confirm`` re-runs, hits case 1 (``invoice_id``
+    set) and re-returns the payload. Idempotent.
+    """
+    sender = conv.sender_phone_e164
+    business_id = business.id
+
+    # --- case 1: the invoice already exists -> idempotent re-send ----------- #
+    # invoice_id is the authoritative "done" flag, checked before state so a
+    # conversation that was somehow re-armed to awaiting_confirm still can't
+    # create a second invoice.
+    if conv.invoice_id is not None:
+        return [conv.last_result_payload] if conv.last_result_payload else []
+
+    # --- case 2: a concurrent worker is mid-create ------------------------- #
+    # It committed state="confirmed" (step 4c) but hasn't committed the invoice
+    # yet. Don't create, don't send a stale/None payload -- it sends the result.
+    if conv.state == "confirmed":
+        return []
+
+    # --- case 3: not ready to confirm ------------------------------------- #
+    if conv.state != "awaiting_confirm":
+        return [
+            _buttons(
+                sender,
+                business_id,
+                "That draft isn't ready to confirm — send the invoice details again.",
+            )
+        ]
+
+    # --- case 4: the real path ------------------------------------------- #
+    customer_id = uuid.UUID(conv.draft_payload["customer_id"])
+    cust = db.get(Customer, customer_id)
+    if cust is None or cust.business_id != business.id:
+        conv.state = "terminal"
+        db.commit()
+        return [
+            _text(
+                sender,
+                business_id,
+                "That customer was removed — add them again on the web app and start over.",
+            )
+        ]
+
+    body = conv_store.to_invoice_create(conv, customer_id)
+
+    # Commit the state transition BEFORE creating. Now a crash mid-create, or a
+    # concurrent second Confirm, sees confirmed + invoice_id is None (case 2).
+    conv.state = "confirmed"
+    db.commit()
+
+    try:
+        invoice = create_invoice_for_business(db, business, body)
+        # create_invoice_for_business already flush()ed: Invoice.id (uuid
+        # default) and .invoice_no (computed in Python by numbering.py) are both
+        # populated now. Set the conversation fields and commit ONCE so the
+        # invoice row + conv.invoice_id + conv.last_result_payload land
+        # atomically -- a failure before this commit leaves no orphan invoice.
+        conv.invoice_id = invoice.id
+        conv.last_result_payload = {
+            "kind": "text",
+            "to": conv.sender_phone_e164,
+            "business_id": str(business.id),
+            "body": f"Invoice {invoice.invoice_no} created.",
+            "then_document_invoice_id": str(invoice.id),
+        }
+        db.commit()
+    except CustomerNotFoundError:
+        # Shouldn't happen after the re-fetch above, but be safe: the state is
+        # already "confirmed" from the commit above, so we must not leave the
+        # conversation re-enterable -- drive it terminal with a result payload.
+        db.rollback()
+        conv.state = "terminal"
+        conv.last_result_payload = _text(
+            sender,
+            business_id,
+            "Couldn't create the invoice — please use the web app.",
+        )
+        db.commit()
+        return [conv.last_result_payload]
+
+    return [conv.last_result_payload]

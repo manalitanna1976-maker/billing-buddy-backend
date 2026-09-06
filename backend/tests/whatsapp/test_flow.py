@@ -7,8 +7,6 @@ slot-fill question or a confirm prompt. The confirm->create path is Task B5.
 
 from decimal import Decimal
 
-import pytest
-
 from app.models import Business, Customer, Invoice, WhatsAppConversation
 from app.services import whatsapp_flow as flow
 from app.services.invoice_ai_parser import ProposedDraft, ProposedLine
@@ -106,6 +104,26 @@ def test_no_customer_named_is_a_gap_and_resolve_not_called(db_session, monkeypat
     assert out[0]["kind"] == "text"
     assert "customer" in out[0]["body"].lower()
     assert _conv(db_session, b).state == "collecting"
+
+
+def test_first_gap_question_flags_missing_product_name():
+    """M4: a line item with no product_name is a gap (asked), never allowed
+    through to handle_confirm where to_invoice_create would KeyError."""
+    for bad in (None, "", "   "):
+        payload = {
+            "gaps": [],
+            "line_items": [{"product_name": bad, "qty": "2", "price": "100", "gst_rate": "18"}],
+        }
+        q = flow._first_gap_question(payload)
+        assert q is not None
+        assert "invoicing" in q.lower()
+
+    # a fully-formed line is still ready (None)
+    ok = {
+        "gaps": [],
+        "line_items": [{"product_name": "Widget", "qty": "2", "price": "100", "gst_rate": "18"}],
+    }
+    assert flow._first_gap_question(ok) is None
 
 
 def test_synthesized_question_when_line_incomplete_and_no_gap(db_session, monkeypatch):
@@ -229,6 +247,29 @@ def test_button_edit_resets_to_collecting(db_session):
     assert _conv(db_session, b).state == "collecting"
 
 
+def test_button_edit_on_awaiting_confirm_keeps_partial_draft(db_session):
+    """A mid-draft Edit (no invoice yet) must PRESERVE draft_payload so the
+    owner can amend the in-progress invoice."""
+    b = _biz(db_session)
+    conv = _conv(db_session, b)
+    conv.state = "awaiting_confirm"
+    conv.draft_payload = {
+        "customer_name": "Rajesh Traders",
+        "line_items": [{"product_name": "Widget", "qty": "2", "price": "100", "gst_rate": "18"}],
+        "gaps": [],
+    }
+    db_session.flush()
+
+    flow.handle_inbound(
+        db_session, _payload(b, kind="button", button_id="wa_edit", text=None)
+    )
+
+    fresh = _conv(db_session, b)
+    assert fresh.state == "collecting"
+    assert fresh.draft_payload["customer_name"] == "Rajesh Traders"
+    assert fresh.draft_payload["line_items"][0]["product_name"] == "Widget"
+
+
 def test_unknown_button_treated_as_edit(db_session):
     b = _biz(db_session)
     conv = _conv(db_session, b)
@@ -242,23 +283,46 @@ def test_unknown_button_treated_as_edit(db_session):
     assert _conv(db_session, b).state == "collecting"
 
 
-def test_button_confirm_delegates_to_b5_stub(db_session):
-    """handle_confirm is Task B5 -- for now it must raise NotImplementedError so
-    B5 has a RED test to turn green."""
+def test_button_confirm_creates_invoice_via_handle_inbound(db_session):
+    """The wa_confirm button branch runs handle_confirm end to end: an
+    awaiting_confirm draft becomes exactly one invoice and a "created" reply."""
     b = _biz(db_session)
-    _conv(db_session, b)
+    cust = _cust(db_session, b)
+    conv = _conv(db_session, b)
+    conv.state = "awaiting_confirm"
+    conv.draft_payload = {
+        "customer_name": cust.name,
+        "customer_id": str(cust.id),
+        "line_items": [{"product_name": "Widget", "qty": "2", "price": "100", "gst_rate": "18"}],
+        "gaps": [],
+    }
+    db_session.flush()
 
-    with pytest.raises(NotImplementedError):
-        flow.handle_inbound(
-            db_session, _payload(b, kind="button", button_id="wa_confirm", text=None)
-        )
+    out = flow.handle_inbound(
+        db_session, _payload(b, kind="button", button_id="wa_confirm", text=None)
+    )
+
+    assert len(out) == 1
+    assert out[0]["kind"] == "text"
+    assert "created" in out[0]["body"].lower()
+    assert out[0]["then_document_invoice_id"]
+    assert db_session.query(Invoice).count() == 1
+    fresh = _conv(db_session, b)
+    assert fresh.state == "confirmed"
+    assert fresh.invoice_id is not None
 
 
-def test_handle_confirm_stub_raises(db_session):
+def test_button_confirm_wrong_state_reasks(db_session):
+    """handle_confirm on a non-awaiting_confirm conv re-asks, creates nothing."""
     b = _biz(db_session)
     conv = _conv(db_session, b)
-    with pytest.raises(NotImplementedError):
-        flow.handle_confirm(db_session, conv, db_session.get(Business, b.id))
+    conv.state = "collecting"
+
+    out = flow.handle_confirm(db_session, conv, db_session.get(Business, b.id))
+
+    assert len(out) == 1
+    assert out[0]["kind"] == "buttons"
+    assert db_session.query(Invoice).count() == 0
 
 
 # --------------------------------------------------------------------------- #

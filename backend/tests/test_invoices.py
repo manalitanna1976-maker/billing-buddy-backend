@@ -92,6 +92,24 @@ def test_invoice_cross_tenant_404(client):
     assert resp.status_code == 404
 
 
+def test_post_invoices_bad_customer_id_returns_404(client):
+    """B0 regression lock: the service raises CustomerNotFoundError, the route
+    translates it to HTTP 404 {"detail": "Customer not found"}."""
+    headers, _ = _setup(client)
+
+    resp = client.post(
+        "/invoices",
+        headers=headers,
+        json={
+            "customer_id": "00000000-0000-0000-0000-000000000000",
+            "invoice_date": "2026-08-16",
+            "line_items": [{"product_name": "Steel Rod", "qty": "1", "price": "100", "gst_rate": "0"}],
+        },
+    )
+    assert resp.status_code == 404
+    assert resp.json() == {"detail": "Customer not found"}
+
+
 def test_delete_invoice_is_a_soft_cancel(client):
     headers, customer_id = _setup(client)
     create_resp = client.post(
