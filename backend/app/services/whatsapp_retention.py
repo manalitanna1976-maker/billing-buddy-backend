@@ -47,9 +47,18 @@ def retention_sweep(db: Session) -> dict:
     stranded = db.execute(
         update(WhatsAppConversation)
         .where(
-            WhatsAppConversation.state == "confirmed",
-            WhatsAppConversation.invoice_id.is_(None),
             WhatsAppConversation.updated_at < cutoff_15m,
+            or_(
+                # a worker crash between handle_confirm's state="confirmed"
+                # commit and its atomic invoice commit
+                (WhatsAppConversation.state == "confirmed")
+                & WhatsAppConversation.invoice_id.is_(None),
+                # the confirm split-window race (I2): state dragged back to
+                # collecting while invoice_id stayed set -- a combination no
+                # reset path in whatsapp_flow covers
+                (WhatsAppConversation.state == "collecting")
+                & WhatsAppConversation.invoice_id.is_not(None),
+            ),
         )
         .values(state="terminal")
         .execution_options(synchronize_session=False)

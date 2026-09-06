@@ -239,6 +239,34 @@ def test_outbound_then_document_enqueues_followup_atomically(db_session, monkeyp
     assert followup[0].business_id == b.id
 
 
+def test_outbound_document_cross_tenant_invoice_raises(db_session, monkeypatch):
+    """I6: the document branch fetches the invoice by PK -- it must also verify
+    the invoice belongs to the job's business, or a full customer invoice PDF
+    could be rendered and sent for another tenant."""
+    b = _biz(db_session)
+    _conn(db_session, b)
+    other = _biz(db_session)
+    other_inv = _invoice(db_session, other)  # belongs to a different business
+    job = _job(
+        db_session, b,
+        {
+            "kind": "document",
+            "to": "+919000000001",
+            "business_id": str(b.id),
+            "invoice_id": str(other_inv.id),
+        },
+    )
+
+    calls = []
+    monkeypatch.setattr(pdf_service, "render_invoice_pdf", lambda invoice: calls.append("render") or b"%PDF")
+    monkeypatch.setattr(whatsapp_client, "upload_media", lambda *a, **k: calls.append("upload") or "m")
+    monkeypatch.setattr(whatsapp_client, "send_document", lambda *a, **k: calls.append("send") or "wamid")
+
+    with pytest.raises(RuntimeError):
+        outbound.handle_outbound(db_session, job)
+    assert calls == []  # nothing rendered, uploaded or sent
+
+
 def test_outbound_send_failure_propagates_no_log_no_completion(db_session, monkeypatch):
     b = _biz(db_session)
     _conn(db_session, b)

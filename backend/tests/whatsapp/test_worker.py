@@ -140,6 +140,62 @@ def test_run_once_outbound_send_calls_adapter_and_completes(db_session, monkeypa
     assert len(logs) == 1 and logs[0].direction == "out"
 
 
+def test_run_once_unknown_job_type_dead_letters_immediately(db_session):
+    """M5: an unknown job type is a poison pill -- dead-letter after ONE
+    run_once, don't burn every claim cycle first."""
+    job = WhatsAppJob(type="bogus", payload={}, status="pending")
+    db_session.add(job)
+    db_session.commit()
+
+    assert worker.run_once(db_session) is True
+
+    db_session.expire_all()
+    reloaded = db_session.get(WhatsAppJob, job.id)
+    assert reloaded.status == "dead_letter"
+    assert reloaded.attempts == 1
+
+
+def test_two_session_double_confirm_one_invoice(db_session):
+    """M2: two independent worker sessions each running the confirm path for the
+    same conversation produce exactly one invoice (invoice_id latch + the
+    commit-before-create ordering)."""
+    from app.db import SessionLocal
+    from app.models import Invoice
+    from app.services import whatsapp_conversations as cs
+    from app.services import whatsapp_flow as flow
+
+    b = _biz(db_session)
+    cust = _cust(db_session, b)
+    conv = cs.get_locked(db_session, b.id, "+919000000001")
+    conv.state = "awaiting_confirm"
+    conv.draft_payload = {
+        "customer_name": cust.name,
+        "customer_id": str(cust.id),
+        "line_items": [{"product_name": "Widget", "qty": "2", "price": "100", "gst_rate": "18"}],
+        "gaps": [],
+    }
+    db_session.commit()
+
+    s1, s2 = SessionLocal(), SessionLocal()
+    try:
+        from app.models import Business
+
+        b1 = s1.get(Business, b.id)
+        conv1 = cs.get_locked(s1, b.id, "+919000000001")
+        out1 = flow.handle_confirm(s1, conv1, b1)  # creates invoice #1, commits
+        assert "created" in out1[0]["body"].lower()
+
+        b2 = s2.get(Business, b.id)
+        conv2 = cs.get_locked(s2, b.id, "+919000000001")
+        out2 = flow.handle_confirm(s2, conv2, b2)  # sees invoice_id latch -> re-send
+        assert out2 == [conv2.last_result_payload]
+    finally:
+        s1.close()
+        s2.close()
+
+    assert db_session.query(Invoice).count() == 1
+
+
 def test_run_once_outbound_send_no_connection_retries(db_session):
     b = _biz(db_session)
     job = jobs.enqueue(

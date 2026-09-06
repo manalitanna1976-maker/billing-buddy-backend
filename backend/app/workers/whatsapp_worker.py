@@ -92,7 +92,11 @@ def run_once(db: Session) -> bool:
                 job.payload.get("kind"),
             )
         else:
-            jobs.fail(db, job, f"unknown whatsapp job type {job.type!r}")
+            # A poison pill: an unknown type will never succeed, so dead-letter
+            # it now rather than burn every claim cycle first (M5).
+            jobs.fail(
+                db, job, f"unknown whatsapp job type {job.type!r}", dead_letter_now=True
+            )
     except Exception as exc:  # noqa: BLE001 -- fail() records + re-queues/dead-letters
         jobs.fail(db, job, repr(exc))
 
@@ -108,8 +112,10 @@ def main() -> None:  # pragma: no cover -- exercised via run_once in tests
             worked = run_once(db)
             now = time.monotonic()
             if not worked and now - last_sweep > _RETENTION_SWEEP_INTERVAL_SECONDS:
-                retention_sweep(db)
+                # Advance the clock BEFORE the sweep: a persistently failing
+                # sweep must not hot-loop every idle iteration (M6).
                 last_sweep = now
+                retention_sweep(db)
         except Exception:  # noqa: BLE001 -- a DB blip must not kill the worker
             logger.exception("worker iteration failed")
             worked = False

@@ -130,10 +130,19 @@ def complete(db: Session, job: WhatsAppJob) -> None:
     db.commit()
 
 
-def fail(db: Session, job: WhatsAppJob, error: str) -> None:
+def fail(
+    db: Session,
+    job: WhatsAppJob,
+    error: str,
+    dead_letter_now: bool = False,
+) -> None:
     """Record a failure. Retries (back to `pending`) until
     `whatsapp_job_max_attempts` is reached, then dead-letters the job and
     alerts. Commits the caller's session. Never raises.
+
+    `dead_letter_now=True` skips the attempts check and dead-letters
+    immediately -- for a poison pill (e.g. an unknown job type) that will never
+    succeed, so it must not burn every claim cycle first (M5).
     """
     settings = config.get_settings()
     # The failed handler may have left the session's transaction aborted (a bad
@@ -144,8 +153,34 @@ def fail(db: Session, job: WhatsAppJob, error: str) -> None:
     if job is None:
         return
     job.last_error = error
-    if job.attempts >= settings.whatsapp_job_max_attempts:
+    if dead_letter_now or job.attempts >= settings.whatsapp_job_max_attempts:
         job.status = "dead_letter"
+        # An inbound_message that dies for good must still tell the owner
+        # something came through and failed -- otherwise a Claude outage means
+        # they text an invoice and hear nothing ever (I5, plan B4). Fold the
+        # reply into THIS transaction. Never for outbound_send (no reply loop).
+        if job.type == "inbound_message" and isinstance(job.payload, dict):
+            biz = job.payload.get("business_id")
+            sender = job.payload.get("sender")
+            if biz and sender:
+                try:
+                    biz_uuid = uuid.UUID(str(biz))
+                except (ValueError, TypeError):
+                    biz_uuid = None
+                build(
+                    db,
+                    "outbound_send",
+                    {
+                        "kind": "text",
+                        "to": sender,
+                        "business_id": str(biz),
+                        "body": (
+                            "Couldn't read that message — please try again or "
+                            "use the web app."
+                        ),
+                    },
+                    business_id=biz_uuid,
+                )
         # Snapshot the fields _alert needs BEFORE the commit, so _alert never
         # triggers a lazy reload / DetachedInstanceError on an expired instance.
         alert_snapshot = {
@@ -181,6 +216,13 @@ def _alert(snapshot: dict) -> None:
     if not webhook_url:
         return
 
+    # The webhook is a third-party transfer (DPDP concern) and `last_error` can
+    # carry model-produced strings derived from message content -- truncate it
+    # here (M4). The full string stays in the DB column and the ERROR log above.
+    last_error = snapshot["last_error"]
+    if isinstance(last_error, str):
+        last_error = last_error[:200]
+
     try:
         httpx.post(
             webhook_url,
@@ -188,7 +230,7 @@ def _alert(snapshot: dict) -> None:
                 "id": str(snapshot["id"]),
                 "type": snapshot["type"],
                 "business_id": str(snapshot["business_id"]) if snapshot["business_id"] else None,
-                "last_error": snapshot["last_error"],
+                "last_error": last_error,
             },
             timeout=_WEBHOOK_TIMEOUT_SECONDS,
         )

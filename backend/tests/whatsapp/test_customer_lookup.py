@@ -160,6 +160,16 @@ def test_other_business_customer_never_matched_on_fuzzy_path(db_session):
     assert isinstance(result, NotFound)
 
 
+def test_short_customer_name_does_not_auto_pick(db_session):
+    """M1: the `cn in qn` direction with no minimum length lets a 2-char
+    customer name match almost any query. Require len(cn) >= 3 for that
+    direction."""
+    b = _biz(db_session)
+    _cust(db_session, b, "AB")  # 2 chars -- a substring of "Fabricators"
+    result = lookup.resolve(db_session, b, "Fabricators supplies order")
+    assert isinstance(result, NotFound)
+
+
 def test_notfound_is_hashable(db_session):
     b = _biz(db_session)
     result = lookup.resolve(db_session, b, "nobody")

@@ -77,7 +77,9 @@ def create_invoice(
     try:
         invoice = create_invoice_for_business(db, business, body)
     except CustomerNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found"
+        ) from None
     db.commit()
     db.refresh(invoice)
     return invoice

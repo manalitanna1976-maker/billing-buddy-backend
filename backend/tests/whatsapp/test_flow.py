@@ -390,17 +390,44 @@ def test_terminal_conversation_resets_before_reparse(db_session, monkeypatch):
     assert fresh.draft_payload.get("customer_name") == "Rajesh Traders"
 
 
-def test_expired_collecting_still_processes(db_session, monkeypatch):
+def test_expired_collecting_starts_fresh(db_session, monkeypatch):
+    """I1: a collecting conv past its 30-min TTL must start a clean draft -- the
+    stale draft_payload must not merge into the new message, and must not be
+    re-sent to Claude as prior_draft (spec: unusable for drafting 30 min after
+    the last message)."""
     from datetime import datetime, timedelta
 
     b = _biz(db_session)
     cust = _cust(db_session, b)
     conv = _conv(db_session, b)
+    conv.draft_payload = {
+        "customer_name": "Old Corp",
+        "line_items": [{"product_name": "StaleItem", "qty": "9", "price": "9", "gst_rate": "9"}],
+        "gaps": [],
+    }
+    conv.state = "collecting"
     conv.expires_at = datetime.utcnow() - timedelta(minutes=1)
-    monkeypatch.setattr(flow, "parse_message", lambda text, prior: _full_draft())
+    db_session.flush()
+
+    seen = {}
+
+    def _parse(text, prior):
+        seen["prior"] = prior
+        return ProposedDraft(
+            customer_name="Rajesh Traders",
+            line_items=[ProposedLine("FreshItem", Decimal("1"), Decimal("50"), Decimal("18"))],
+            gaps=[],
+        )
+
+    monkeypatch.setattr(flow, "parse_message", _parse)
     monkeypatch.setattr(flow, "resolve", lambda db, biz, name: Matched(customer=cust))
 
-    out = flow.handle_inbound(db_session, _payload(b))
+    flow.handle_inbound(db_session, _payload(b))
 
-    assert out[0]["kind"] == "buttons"
-    assert _conv(db_session, b).state == "awaiting_confirm"
+    # the stale draft was wiped before parsing: prior_draft was empty
+    assert seen["prior"] in (None, {})
+    fresh = _conv(db_session, b)
+    names = [li["product_name"] for li in fresh.draft_payload.get("line_items", [])]
+    assert "StaleItem" not in names
+    assert names == ["FreshItem"]
+    assert fresh.draft_payload.get("customer_name") == "Rajesh Traders"

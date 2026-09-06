@@ -35,7 +35,9 @@ see its docstring.
 
 from __future__ import annotations
 
+import logging
 import uuid
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.orm import Session
@@ -46,6 +48,8 @@ from app.services.gst import LineItemInput, compute_invoice_totals
 from app.services.invoice_ai_parser import parse_message
 from app.services.invoices import CustomerNotFoundError, create_invoice_for_business
 from app.services.whatsapp_customer_lookup import Ambiguous, Matched, NotFound, resolve
+
+logger = logging.getLogger(__name__)
 
 _EXPIRED_STATES = {"awaiting_confirm", "confirmed"}
 
@@ -87,10 +91,19 @@ def handle_inbound(db: Session, job_payload: dict) -> list[dict]:
     conv = conv_store.get_locked(db, business_id, sender)
 
     # --- expiry: an aged-out draft that was awaiting confirmation (or frozen)
-    # is dead; a fresh text starts over.
-    if conv_store.is_expired(conv) and conv.state in _EXPIRED_STATES:
-        conv.state = "terminal"
-        return [_text(sender, business_id, _MSG_EXPIRED)]
+    # is dead; a fresh text starts over. An invoice that exists (invoice_id set)
+    # is NEVER "expired" -- it must still reach handle_confirm's idempotent
+    # re-send (case 1) so the PDF is not lost (I4).
+    if conv.invoice_id is None and conv_store.is_expired(conv):
+        if conv.state in _EXPIRED_STATES:
+            conv.state = "terminal"
+            return [_text(sender, business_id, _MSG_EXPIRED)]
+        # Past the 30-min TTL in any other non-terminal state (collecting): a
+        # fresh text starts a clean draft, never resumes the stale one -- spec
+        # §Retention: "unusable for drafting 30 minutes after the last message"
+        # (I1). Without this the day-old draft_payload merges into the new
+        # message and stale PII is re-sent to Claude as prior_draft.
+        _reset_to_fresh_draft(conv)
 
     if kind == "button":
         return _handle_button(db, job_payload, conv, business, sender, business_id)
@@ -140,11 +153,14 @@ def _handle_text(db, job_payload, conv, business, sender, business_id) -> list[d
     text = job_payload["text"]
 
     # A finished conversation starts fresh: wipe the stale draft AND the
-    # previous invoice's result before parsing. This covers both `terminal`
-    # (invoice made, or expired/abandoned) AND `confirmed` -- a post-confirm
-    # follow-up text ("ok thanks") must begin a genuinely new draft, never
-    # re-arm the frozen one.
-    if conv.state in ("terminal", "confirmed"):
+    # previous invoice's result before parsing. The `invoice_id is not None`
+    # latch is the authoritative trigger (not `state`): the confirm split-window
+    # race can leave `state="collecting"` WITH `invoice_id` set -- a combination
+    # no state-only reset covers, which otherwise re-sends invoice #1 forever
+    # (I2). `terminal` / `confirmed` are also covered: a post-confirm follow-up
+    # text ("ok thanks") must begin a genuinely new draft, never re-arm the
+    # frozen one.
+    if conv.invoice_id is not None or conv.state in ("terminal", "confirmed"):
         _reset_to_fresh_draft(conv)
 
     draft = parse_message(text, conv.draft_payload)
@@ -323,10 +339,31 @@ def handle_confirm(db: Session, conv, business) -> list[dict]:
     if conv.invoice_id is not None:
         return [conv.last_result_payload] if conv.last_result_payload else []
 
-    # --- case 2: a concurrent worker is mid-create ------------------------- #
-    # It committed state="confirmed" (step 4c) but hasn't committed the invoice
-    # yet. Don't create, don't send a stale/None payload -- it sends the result.
+    # --- case 1b: a create attempt already failed for good ----------------- #
+    # `state="terminal"` WITH a stored result payload but no invoice_id means a
+    # previous create raised (case 4 below drove it here). Re-send that verdict
+    # so a re-claimed confirm job is idempotent, never `[]` and never a generic
+    # "not ready" re-ask (I3).
+    if conv.state == "terminal" and conv.last_result_payload:
+        return [conv.last_result_payload]
+
+    # --- case 2: a concurrent worker is mid-create, OR it died mid-create -- #
+    # It committed state="confirmed" (step 4c) but hasn't committed the invoice.
+    # If the row is fresh, a live worker still owns it -> do nothing. If it has
+    # been stranded past the 15-min cutoff (same one the retention sweep uses),
+    # the create was lost: drive it terminal with a failure reply so the confirm
+    # is never silently dropped (I3).
     if conv.state == "confirmed":
+        stale_cutoff = datetime.utcnow() - timedelta(minutes=15)
+        if conv.updated_at is not None and conv.updated_at < stale_cutoff:
+            conv.state = "terminal"
+            conv.last_result_payload = _text(
+                sender,
+                business_id,
+                "Couldn't create that invoice — please use the web app.",
+            )
+            db.commit()
+            return [conv.last_result_payload]
         return []
 
     # --- case 3: not ready to confirm ------------------------------------- #
@@ -386,6 +423,27 @@ def handle_confirm(db: Session, conv, business) -> list[dict]:
             sender,
             business_id,
             "Couldn't create the invoice — please use the web app.",
+        )
+        db.commit()
+        return [conv.last_result_payload]
+    except Exception:
+        # Any other create/commit failure (OperationalError, serialization
+        # failure, IntegrityError, ...): state is already "confirmed", so the
+        # conversation must not stay re-enterable and silently drop the confirm
+        # (I3). Drive it terminal with a result payload -- the owner is told,
+        # the job completes, nothing is re-raised. Log at exception level so a
+        # genuine create bug is visible to ops, not just "use the web app".
+        logger.exception(
+            "whatsapp confirm: invoice create failed for business=%s sender=%s",
+            business_id,
+            sender,
+        )
+        db.rollback()
+        conv.state = "terminal"
+        conv.last_result_payload = _text(
+            sender,
+            business_id,
+            "Couldn't create that invoice — please use the web app.",
         )
         db.commit()
         return [conv.last_result_payload]

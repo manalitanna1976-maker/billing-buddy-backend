@@ -77,7 +77,11 @@ def handle_outbound(db: Session, job: WhatsAppJob) -> None:
         mid = whatsapp_client.send_buttons(conn, to, payload["body"], buttons)
     elif kind == "document":
         inv = db.get(Invoice, uuid.UUID(str(payload["invoice_id"])))
-        if inv is None:
+        # Tenant check: the connection is business-scoped but the invoice is
+        # fetched by PK -- this is the one place a full customer invoice PDF is
+        # rendered and sent to a phone number (I6). Same message either way so
+        # existence is not leaked.
+        if inv is None or inv.business_id != business_id:
             raise RuntimeError("invoice not found for document send")
         pdf_bytes = pdf.render_invoice_pdf(inv)
         filename = f"{inv.invoice_no}.pdf"

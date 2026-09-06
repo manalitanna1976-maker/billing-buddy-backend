@@ -7,6 +7,7 @@ that behaviour: exactly one invoice per draft, a double tap re-sends the stored
 result, and a concurrent worker that is mid-create is a no-op.
 """
 
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -17,6 +18,19 @@ from app.services import whatsapp_flow as flow
 from app.services.invoice_ai_parser import ProposedDraft, ProposedLine
 from app.services.invoices import CustomerNotFoundError
 from app.services.whatsapp_customer_lookup import Matched
+
+
+def _confirm_payload(business, **extra):
+    p = {
+        "business_id": str(business.id),
+        "sender": "+919000000001",
+        "wa_message_id": "wamid.x",
+        "kind": "button",
+        "button_id": "wa_confirm",
+        "text": None,
+    }
+    p.update(extra)
+    return p
 
 
 def _biz(db, state="Gujarat"):
@@ -352,6 +366,108 @@ def test_confirm_customer_not_found_during_create_is_terminal(db_session, monkey
     again = flow.handle_confirm(db_session, conv, b)
     assert db_session.query(Invoice).count() == 0
     assert "created" not in again[0]["body"].lower()
+
+
+def test_collecting_with_invoice_id_latch_makes_second_invoice(db_session, monkeypatch):
+    """I2: the confirm split-window race can leave state='collecting' WITH
+    invoice_id set. The reset must trigger on the invoice_id latch (not state),
+    so a fresh dictation + Confirm mints invoice #2 instead of re-sending #1."""
+    b = _biz(db_session)
+    cust = _cust(db_session, b)
+    conv = _awaiting_conv(db_session, b, cust)
+    flow.handle_confirm(db_session, conv, b)  # invoice #1
+    assert db_session.query(Invoice).count() == 1
+
+    # simulate the split: a wa_edit worker dragged state back while invoice_id stayed
+    conv.state = "collecting"
+    db_session.flush()
+
+    monkeypatch.setattr(
+        flow,
+        "parse_message",
+        lambda text, prior: ProposedDraft(
+            customer_name="Rajesh Traders",
+            line_items=[ProposedLine("Gadget", Decimal("3"), Decimal("50"), Decimal("18"))],
+            gaps=[],
+        ),
+    )
+    monkeypatch.setattr(flow, "resolve", lambda *a, **k: Matched(customer=cust))
+
+    flow.handle_inbound(
+        db_session, _confirm_payload(b, kind="text", button_id=None, text="rajesh 3 gadget 50")
+    )
+    out = flow.handle_inbound(db_session, _confirm_payload(b))
+
+    assert "created" in out[0]["body"].lower()
+    assert db_session.query(Invoice).count() == 2
+
+
+def test_confirm_generic_create_failure_is_terminal_and_idempotent(db_session, monkeypatch):
+    """I3(a): a non-CustomerNotFoundError failure during create must not be
+    silently dropped -- drive terminal + reply the owner, and a re-run re-sends
+    that verdict (never [] -> job marked done with no reply)."""
+    b = _biz(db_session)
+    cust = _cust(db_session, b)
+    conv = _awaiting_conv(db_session, b, cust)
+
+    def _boom(db, business, body):
+        raise RuntimeError("serialization failure")
+
+    monkeypatch.setattr(flow, "create_invoice_for_business", _boom)
+
+    out = flow.handle_confirm(db_session, conv, b)
+
+    assert db_session.query(Invoice).count() == 0
+    assert conv.state == "terminal"
+    assert out == [conv.last_result_payload]
+    assert "web app" in out[0]["body"].lower()
+
+    monkeypatch.undo()
+    again = flow.handle_confirm(db_session, conv, b)
+    assert db_session.query(Invoice).count() == 0
+    assert again == [conv.last_result_payload]
+    assert "created" not in again[0]["body"].lower()
+
+
+def test_confirm_stale_confirmed_split_is_driven_terminal(db_session):
+    """I3(b): state='confirmed' + invoice_id None + updated_at past the 15-min
+    stranded cutoff means the create was lost -> handle_confirm drives it
+    terminal and replies, instead of returning [] forever (case 2)."""
+    b = _biz(db_session)
+    cust = _cust(db_session, b)
+    conv = _awaiting_conv(db_session, b, cust)
+    conv.state = "confirmed"
+    conv.invoice_id = None
+    conv.updated_at = datetime.utcnow() - timedelta(minutes=20)
+    db_session.flush()
+
+    out = flow.handle_confirm(db_session, conv, b)
+
+    assert conv.state == "terminal"
+    assert len(out) == 1
+    assert out[0]["kind"] == "text"
+    assert "web app" in out[0]["body"].lower()
+    assert db_session.query(Invoice).count() == 0
+
+
+def test_stale_reclaim_after_invoice_created_resends_pdf(db_session):
+    """I4: an invoice that exists is never 'expired'. A stale-reclaimed
+    wa_confirm job on a confirmed+invoice_id conv past its TTL must re-send the
+    stored result payload (PDF), not '_MSG_EXPIRED'."""
+    b = _biz(db_session)
+    cust = _cust(db_session, b)
+    conv = _awaiting_conv(db_session, b, cust)
+    out1 = flow.handle_confirm(db_session, conv, b)
+    assert out1[0]["then_document_invoice_id"]
+
+    conv.expires_at = datetime.utcnow() - timedelta(minutes=1)
+    db_session.flush()
+
+    out2 = flow.handle_inbound(db_session, _confirm_payload(b))
+
+    assert out2 == out1
+    assert "expired" not in out2[0]["body"].lower()
+    assert cs.get_locked(db_session, b.id, "+919000000001").state == "confirmed"
 
 
 def test_confirm_atomic_no_orphan_invoice_on_commit_failure(db_session, monkeypatch):

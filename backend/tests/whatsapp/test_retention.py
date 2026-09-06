@@ -100,6 +100,32 @@ def test_retention_resets_stranded_confirms(db_session):
     assert counts["stranded_confirms"] == 1
 
 
+def test_retention_resets_collecting_row_with_invoice_id(db_session):
+    """I2 belt-and-braces: a non-terminal row stuck at state='collecting' WITH
+    invoice_id set (the confirm split-window race) and idle past 15 min is reset
+    to terminal by the sweep."""
+    b = _biz(db_session)
+    now = datetime.utcnow()
+    inv_id = _invoice(db_session, b).id
+
+    stuck = _conv(
+        db_session, b, "+91900000040", state="collecting", invoice_id=inv_id,
+        expires_at=now + timedelta(hours=5), updated_at=now - timedelta(minutes=30),
+    )
+    fresh_collecting = _conv(
+        db_session, b, "+91900000041", state="collecting", invoice_id=inv_id,
+        expires_at=now + timedelta(hours=5), updated_at=now - timedelta(minutes=2),
+    )
+    db_session.commit()
+
+    counts = retention_sweep(db_session)
+
+    db_session.expire_all()
+    assert db_session.get(WhatsAppConversation, stuck.id).state == "terminal"
+    assert db_session.get(WhatsAppConversation, fresh_collecting.id).state == "collecting"
+    assert counts["stranded_confirms"] == 1
+
+
 def test_retention_message_log_never_has_body(db_session):
     b = _biz(db_session)
     now = datetime.utcnow()

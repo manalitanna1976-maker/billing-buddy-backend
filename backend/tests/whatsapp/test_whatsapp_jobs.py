@@ -141,3 +141,67 @@ def test_dead_letter_posts_webhook(db_session, monkeypatch):
     assert posts[0]["url"] == "https://hook.example/dl"
     assert posts[0]["timeout"] == 5
     assert posts[0]["json"]["id"] == str(j.id)
+
+
+def test_dead_letter_inbound_enqueues_owner_reply(db_session, monkeypatch):
+    """I5: an inbound_message that dead-letters (Claude outage, malformed tool
+    response) must enqueue a text outbound_send telling the owner, in the same
+    transaction. An outbound_send dead-lettering must NOT (no reply loop)."""
+    from app.models import Business
+
+    monkeypatch.setattr(
+        "app.config.get_settings", lambda: _settings_with(whatsapp_job_max_attempts=1)
+    )
+    biz = Business(name="Acme")
+    db_session.add(biz)
+    db_session.commit()
+
+    q.enqueue(
+        db_session,
+        "inbound_message",
+        {"business_id": str(biz.id), "sender": "+919000000001", "text": "invoice ..."},
+    )
+    j = q.claim_next(db_session)
+    q.fail(db_session, j, "Claude API error: 529 overloaded")
+
+    replies = (
+        db_session.query(WhatsAppJob)
+        .filter_by(type="outbound_send", business_id=biz.id)
+        .all()
+    )
+    assert len(replies) == 1
+    assert replies[0].payload["kind"] == "text"
+    assert replies[0].payload["to"] == "+919000000001"
+    assert "web app" in replies[0].payload["body"].lower()
+
+    # an outbound_send dead-lettering spawns nothing
+    q.enqueue(db_session, "outbound_send", {"business_id": str(biz.id), "kind": "text"})
+    j2 = q.claim_next(db_session)
+    q.fail(db_session, j2, "meta down")
+    assert (
+        db_session.query(WhatsAppJob).filter_by(type="outbound_send").count() == 2
+    )  # the one we just enqueued + the I5 reply; no third
+
+
+def test_webhook_last_error_truncated_to_200(db_session, monkeypatch):
+    """M4: the third-party dead-letter webhook gets last_error truncated to 200
+    chars (model-derived content, DPDP); the DB column keeps the full string."""
+    posts = []
+    monkeypatch.setattr(
+        "app.config.get_settings",
+        lambda: _settings_with(
+            whatsapp_job_max_attempts=1, deadletter_webhook_url="https://hook.example/dl"
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.whatsapp_jobs.httpx.post",
+        lambda url, json=None, timeout=None: posts.append(json),
+    )
+
+    long_err = "x" * 500
+    q.enqueue(db_session, "outbound_send", {"m": 1})
+    j = q.claim_next(db_session)
+    q.fail(db_session, j, long_err)
+
+    assert len(posts[0]["last_error"]) == 200
+    assert db_session.get(WhatsAppJob, j.id).last_error == long_err  # full in DB

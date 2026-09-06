@@ -92,11 +92,15 @@ def resolve(db: Session, business: Business, name: str) -> "Matched | Ambiguous 
         .limit(FETCH_CAP)
         .all()
     )
+    # The `cn in qn` direction needs a minimum length: a customer named "S" /
+    # "Co" / "AB" is a substring of almost any query and would auto-select if it
+    # were the only such match (M1). `qn in cn` (query is a substring of the
+    # name) has no such failure mode.
     fuzzy = [
         c
         for c in rows
         if (cn := (c.name or "").strip().casefold())
-        and (qn in cn or cn in qn)
+        and (qn in cn or (len(cn) >= 3 and cn in qn))
     ]
     if fuzzy:
         return _resolve_bucket(fuzzy)
