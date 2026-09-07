@@ -85,6 +85,17 @@ class Invoice(Base):
     invoice_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     invoice_no: Mapped[str] = mapped_column(String(50))
     invoice_date: Mapped[date] = mapped_column(Date)
+    # Bill-to snapshot: the customer's details AS OF the time the invoice was
+    # written. A GST invoice is a legal record and must not change when the
+    # customer master is later edited. `customer_id` still links to the master
+    # (for lookups / the customer column in lists); rendering uses these.
+    bill_to_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    bill_to_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bill_to_gstin: Mapped[str | None] = mapped_column(String(15), nullable=True)
+    bill_to_pan: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    bill_to_state: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    bill_to_phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    ship_to: Mapped[str | None] = mapped_column(Text, nullable=True)
     challan_no: Mapped[str | None] = mapped_column(String(50), nullable=True)
     challan_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     po_no: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -96,19 +107,25 @@ class Invoice(Base):
     bank_account_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("bank_accounts.id"), nullable=True
     )
-    discount_type: Mapped[str] = mapped_column(String(3), default="Rs")  # "Rs" | "%"
-    discount_value: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
-    tcs: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    discount_type: Mapped[str] = mapped_column(String(4), default="Rs")  # "Rs" | "%"
+    discount_value: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+    tcs: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
     round_off: Mapped[bool] = mapped_column(Boolean, default=True)
     terms_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     terms_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     remarks: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    taxable_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
-    tax_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
-    grand_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    taxable_total: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+    cgst_total: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+    sgst_total: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+    igst_total: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+    tax_total: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+    round_off_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+    grand_total: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
     payment_type: Mapped[str] = mapped_column(String(10), default="credit")
     status: Mapped[str] = mapped_column(String(10), default="draft")  # draft | saved | cancelled
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     line_items: Mapped[list["InvoiceLineItem"]] = relationship(
@@ -153,12 +170,12 @@ class InvoiceLineItem(Base):
     sr_no: Mapped[int] = mapped_column(Integer)
     product_name: Mapped[str] = mapped_column(String(200))
     hsn_sac: Mapped[str | None] = mapped_column(String(10), nullable=True)
-    qty: Mapped[Decimal] = mapped_column(Numeric(12, 3))
+    qty: Mapped[Decimal] = mapped_column(Numeric(15, 3))
     uom: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
-    discount: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
-    gst_rate: Mapped[Decimal] = mapped_column(Numeric(4, 2), default=0)
-    line_total: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    price: Mapped[Decimal] = mapped_column(Numeric(15, 2))
+    discount: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=0)
+    gst_rate: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=0)
+    line_total: Mapped[Decimal] = mapped_column(Numeric(18, 2))
 
     invoice: Mapped[Invoice] = relationship(back_populates="line_items")
 

@@ -1,17 +1,25 @@
 import re
 import uuid
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.db import get_db
 from app.deps import get_current_business
-from app.models import Business, Customer, Invoice
-from app.schemas.invoice import InvoiceCreate, InvoiceListItem, InvoiceRead
+from app.models import BankAccount, Business, Customer, Invoice
+from app.schemas.invoice import (
+    InvoiceCreate,
+    InvoiceListResponse,
+    InvoiceRead,
+)
 from app.services.invoices import (
+    BankAccountNotFoundError,
     CustomerNotFoundError,
     apply_totals_and_items,
     create_invoice_for_business,
+    snapshot_bill_to,
 )
 from app.services.pdf import render_invoice_pdf
 
@@ -50,22 +58,48 @@ def _get_owned_or_404(db: Session, business: Business, invoice_id: uuid.UUID) ->
     return invoice
 
 
-@router.get("", response_model=list[InvoiceListItem])
+@router.get("", response_model=InvoiceListResponse)
 def list_invoices(
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    status_filter: str | None = Query(None, alias="status"),
+    q: str | None = None,
     business: Business = Depends(get_current_business),
     db: Session = Depends(get_db),
 ):
-    limit = min(limit, 200)
-    return (
-        db.query(Invoice)
-        .filter(Invoice.business_id == business.id)
-        .order_by(Invoice.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
+    # Single query with the customer name joined in -- the list page no longer
+    # needs an N+1 fan-out of GET /invoices/{id} just to show the customer.
+    base = (
+        select(Invoice, Customer.name.label("customer_name"))
+        .join(Customer, Invoice.customer_id == Customer.id)
+        .where(Invoice.business_id == business.id)
     )
+    if status_filter:
+        base = base.where(Invoice.status == status_filter)
+    if q:
+        like = f"%{q}%"
+        base = base.where(Invoice.invoice_no.ilike(like) | Customer.name.ilike(like))
+
+    total = db.execute(
+        select(func.count()).select_from(base.order_by(None).subquery())
+    ).scalar_one()
+
+    rows = db.execute(
+        base.order_by(Invoice.created_at.desc()).offset(offset).limit(limit)
+    ).all()
+
+    items = [
+        {
+            "id": inv.id,
+            "invoice_no": inv.invoice_no,
+            "invoice_date": inv.invoice_date,
+            "customer_name": customer_name,
+            "grand_total": inv.grand_total,
+            "status": inv.status,
+        }
+        for inv, customer_name in rows
+    ]
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.post("", response_model=InvoiceRead, status_code=status.HTTP_201_CREATED)
@@ -79,6 +113,10 @@ def create_invoice(
     except CustomerNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found"
+        ) from None
+    except BankAccountNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Bank account not found"
         ) from None
     db.commit()
     db.refresh(invoice)
@@ -102,15 +140,56 @@ def update_invoice(
     db: Session = Depends(get_db),
 ):
     invoice = _get_owned_or_404(db, business, invoice_id)
+    if invoice.status != "draft":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"a {invoice.status} invoice cannot be edited",
+        )
     customer = db.get(Customer, body.customer_id)
     if customer is None or customer.business_id != business.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
 
+    if body.bank_account_id is not None:
+        account = db.get(BankAccount, body.bank_account_id)
+        if account is None or account.business_id != business.id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Bank account not found"
+            )
+
     for field, value in body.model_dump(exclude={"customer_id", "line_items"}).items():
         setattr(invoice, field, value)
     invoice.customer_id = body.customer_id
+    snapshot_bill_to(invoice, customer)
     apply_totals_and_items(invoice, body, business, customer)
 
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
+@router.post("/{invoice_id}/finalize", response_model=InvoiceRead)
+def finalize_invoice(
+    invoice_id: uuid.UUID,
+    business: Business = Depends(get_current_business),
+    db: Session = Depends(get_db),
+):
+    """draft -> saved. A finalized invoice is locked: no further edits, only
+    cancellation. This is the point the invoice becomes a committed record."""
+    invoice = _get_owned_or_404(db, business, invoice_id)
+    if invoice.status == "saved":
+        return invoice
+    if invoice.status != "draft":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"a {invoice.status} invoice cannot be finalized",
+        )
+    if not invoice.line_items:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="cannot finalize an invoice with no line items",
+        )
+    invoice.status = "saved"
+    invoice.finalized_at = datetime.utcnow()
     db.commit()
     db.refresh(invoice)
     return invoice
@@ -127,6 +206,10 @@ def cancel_invoice(
     # record the invoice ever existed. Cancelling preserves the row and its
     # invoice_no while marking it void.
     invoice = _get_owned_or_404(db, business, invoice_id)
+    if invoice.status == "cancelled":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="invoice is already cancelled"
+        )
     invoice.status = "cancelled"
     db.commit()
     db.refresh(invoice)

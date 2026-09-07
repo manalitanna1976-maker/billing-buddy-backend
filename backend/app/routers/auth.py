@@ -6,7 +6,13 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.deps import oauth2_scheme
 from app.models import Business, User
-from app.rate_limit import is_login_rate_limited, record_failed_login, reset_failed_logins
+from app.rate_limit import (
+    is_login_rate_limited,
+    is_signup_rate_limited,
+    record_failed_login,
+    record_signup_attempt,
+    reset_failed_logins,
+)
 from app.schemas.auth import LoginRequest, SignupRequest, TokenResponse
 from app.security import create_access_token, decode_access_token, hash_password, verify_password_or_dummy
 from app.token_revocation import revoke_token
@@ -20,7 +26,15 @@ already_registered = HTTPException(
 
 
 @router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-def signup(body: SignupRequest, db: Session = Depends(get_db)):
+def signup(body: SignupRequest, request: Request, db: Session = Depends(get_db)):
+    client_ip = request.client.host if request.client else "unknown"
+    if is_signup_rate_limited(db, client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many accounts created from this network. Please try again later.",
+        )
+    record_signup_attempt(db, client_ip)
+
     existing = db.query(User).filter(User.email == body.email).first()
     if existing:
         raise already_registered

@@ -1,12 +1,25 @@
+import logging
+import uuid
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 
 from app.config import get_settings
-from app.routers import auth, bank_accounts, business, customers, invoices, whatsapp
+from app.routers import (
+    auth,
+    bank_accounts,
+    business,
+    customers,
+    invoices,
+    meta,
+    whatsapp,
+)
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 app = FastAPI(title="Billing Buddy CRM API")
@@ -19,11 +32,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(IntegrityError)
+async def _integrity_error_handler(request: Request, exc: IntegrityError):
+    logger.warning("integrity error on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={"detail": "That change conflicts with existing data."},
+    )
+
+
+@app.exception_handler(DataError)
+async def _data_error_handler(request: Request, exc: DataError):
+    logger.warning("data error on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": "One or more values are out of the accepted range."},
+    )
+
+
+@app.exception_handler(SQLAlchemyError)
+async def _db_error_handler(request: Request, exc: SQLAlchemyError):
+    err_id = uuid.uuid4().hex[:12]
+    logger.exception("db error %s on %s %s", err_id, request.method, request.url.path)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": f"Internal error (ref {err_id})."},
+    )
+
 app.include_router(auth.router)
 app.include_router(business.router)
 app.include_router(bank_accounts.router)
 app.include_router(customers.router)
 app.include_router(invoices.router)
+app.include_router(meta.router)
 app.include_router(whatsapp.router)
 
 Path(get_settings().upload_dir).mkdir(exist_ok=True)

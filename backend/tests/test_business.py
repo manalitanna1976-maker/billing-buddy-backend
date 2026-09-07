@@ -23,7 +23,8 @@ def test_update_business_profile(client):
     )
     assert resp.status_code == 200
     assert resp.json()["gstin"] == "24AAAAA0000A1Z5"
-    assert resp.json()["state"] == "Gujarat"
+    # free-text state is canonicalised to "<code>-<Name>"
+    assert resp.json()["state"] == "24-Gujarat"
 
 
 def test_business_requires_auth(client):

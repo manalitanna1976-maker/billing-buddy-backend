@@ -66,7 +66,10 @@ def test_list_and_get_invoice(client):
 
     list_resp = client.get("/invoices", headers=headers)
     assert list_resp.status_code == 200
-    assert len(list_resp.json()) == 1
+    body = list_resp.json()
+    assert body["total"] == 1
+    assert len(body["items"]) == 1
+    assert body["items"][0]["customer_name"] == "Acme Traders"
 
     get_resp = client.get(f"/invoices/{invoice_id}", headers=headers)
     assert get_resp.status_code == 200

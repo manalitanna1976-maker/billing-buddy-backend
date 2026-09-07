@@ -53,6 +53,11 @@ EMAIL_WINDOW_SECONDS = 15 * 60
 IP_MAX_ATTEMPTS = 30
 IP_WINDOW_SECONDS = 15 * 60
 
+# Account creation: cap per IP so signup can't be used to mass-create
+# businesses / exhaust the DB.
+SIGNUP_MAX_ATTEMPTS = 20
+SIGNUP_WINDOW_SECONDS = 60 * 60
+
 # The WhatsApp webhook reuses the same `rate_limit_events` table for its
 # per-sender / per-business throttling. Keeping its window here (rather than a
 # private constant in the webhook router) means `_global_prune` / `sweep_expired`
@@ -69,13 +74,30 @@ def _ip_key(ip: str) -> str:
     return f"ip:{ip}"
 
 
+def _signup_key(ip: str) -> str:
+    return f"signup:{ip}"
+
+
+def is_signup_rate_limited(db: Session, ip: str) -> bool:
+    """True if this IP has created too many accounts in the window."""
+    return (
+        count_in_window(db, _signup_key(ip), SIGNUP_WINDOW_SECONDS) >= SIGNUP_MAX_ATTEMPTS
+    )
+
+
+def record_signup_attempt(db: Session, ip: str) -> None:
+    """Record one account-creation attempt against the IP bucket. Commits."""
+    add_events(db, [_signup_key(ip)])
+    db.commit()
+
+
 def _global_prune(db: Session) -> None:
     """Delete every row older than the longest configured window. A single
     global delete run on every write, so orphan buckets that are never
     retried still age out without a scheduler.
     """
     cutoff = datetime.utcnow() - timedelta(
-        seconds=max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS, WHATSAPP_WINDOW_SECONDS)
+        seconds=max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS, WHATSAPP_WINDOW_SECONDS, SIGNUP_WINDOW_SECONDS)
     )
     db.execute(delete(RateLimitEvent).where(RateLimitEvent.occurred_at <= cutoff))
 
@@ -155,7 +177,7 @@ def sweep_expired(db: Session) -> int:
     Commits the caller's session.
     """
     cutoff = datetime.utcnow() - timedelta(
-        seconds=max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS, WHATSAPP_WINDOW_SECONDS)
+        seconds=max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS, WHATSAPP_WINDOW_SECONDS, SIGNUP_WINDOW_SECONDS)
     )
     result = db.execute(
         delete(RateLimitEvent).where(RateLimitEvent.occurred_at <= cutoff)

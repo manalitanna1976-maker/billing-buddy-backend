@@ -15,9 +15,21 @@
   .signature { max-height: 50px; margin-top: 20px; }
   .logo-fallback { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
   .logo-fallback-label { font-weight: bold; font-size: 13px; color: #15803d; }
+  .watermark {
+    position: fixed; top: 40%; left: 0; width: 100%; text-align: center;
+    font-size: 90px; font-weight: bold; letter-spacing: 8px;
+    transform: rotate(-24deg); opacity: 0.12; z-index: 1000;
+  }
+  .watermark.cancelled { color: #b91c1c; }
+  .watermark.draft { color: #6b7280; }
 </style>
 </head>
 <body>
+  {% if invoice.status == "cancelled" %}
+  <div class="watermark cancelled">CANCELLED</div>
+  {% elif invoice.status == "draft" %}
+  <div class="watermark draft">DRAFT</div>
+  {% endif %}
   <div class="header-row">
     <div>
       {% if business.logo_url %}
@@ -43,10 +55,11 @@
   </div>
 
   <h2>Bill To</h2>
-  <div>{{ customer.name }}</div>
-  <div>{{ customer.address or "" }}</div>
-  <div>GSTIN: {{ customer.gstin or "-" }} &middot; PAN: {{ customer.pan or "-" }}</div>
-  <div>Place of Supply: {{ customer.place_of_supply or "-" }}</div>
+  <div>{{ invoice.bill_to_name or customer.name }}</div>
+  <div>{{ invoice.bill_to_address or "" }}</div>
+  <div>GSTIN: {{ invoice.bill_to_gstin or "-" }} &middot; PAN: {{ invoice.bill_to_pan or "-" }}</div>
+  <div>Place of Supply: {{ invoice.bill_to_state or "-" }}</div>
+  {% if invoice.ship_to %}<div>Ship To: {{ invoice.ship_to }}</div>{% endif %}
 
   <table>
     <thead>
@@ -73,9 +86,25 @@
   </table>
 
   <table class="totals">
-    <tr><td>Taxable Total</td><td>{{ invoice.taxable_total }}</td></tr>
-    <tr><td>Total Tax</td><td>{{ invoice.tax_total }}</td></tr>
-    <tr class="grand-total"><td>Grand Total</td><td>{{ invoice.grand_total }}</td></tr>
+    {% if invoice.discount_amount and invoice.discount_amount != 0 %}
+    <tr><td>Subtotal</td><td>{{ '%.2f'|format(invoice.taxable_total + invoice.discount_amount) }}</td></tr>
+    <tr><td>Discount</td><td>-{{ '%.2f'|format(invoice.discount_amount) }}</td></tr>
+    {% endif %}
+    <tr><td>Taxable Value</td><td>{{ '%.2f'|format(invoice.taxable_total) }}</td></tr>
+    {% if invoice.igst_total and invoice.igst_total != 0 %}
+    <tr><td>IGST</td><td>{{ '%.2f'|format(invoice.igst_total) }}</td></tr>
+    {% else %}
+    <tr><td>CGST</td><td>{{ '%.2f'|format(invoice.cgst_total) }}</td></tr>
+    <tr><td>SGST</td><td>{{ '%.2f'|format(invoice.sgst_total) }}</td></tr>
+    {% endif %}
+    <tr><td>Total Tax</td><td>{{ '%.2f'|format(invoice.tax_total) }}</td></tr>
+    {% if invoice.tcs and invoice.tcs != 0 %}
+    <tr><td>TCS</td><td>{{ '%.2f'|format(invoice.tcs) }}</td></tr>
+    {% endif %}
+    {% if invoice.round_off_amount and invoice.round_off_amount != 0 %}
+    <tr><td>Round Off</td><td>{{ '%.2f'|format(invoice.round_off_amount) }}</td></tr>
+    {% endif %}
+    <tr class="grand-total"><td>Grand Total</td><td>{{ '%.2f'|format(invoice.grand_total) }}</td></tr>
   </table>
   <div>Amount in words: {{ amount_in_words }}</div>
 

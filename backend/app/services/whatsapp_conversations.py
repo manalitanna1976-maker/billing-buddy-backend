@@ -137,13 +137,12 @@ def to_invoice_create(
 
     Decimals were stored as strings; convert them back.
 
-    This function does NOT raise on an empty / incomplete draft:
-    ``InvoiceCreate.line_items`` has no minimum length, so a draft with zero
-    line items produces a perfectly valid ``InvoiceCreate`` with an empty
-    ``line_items`` list and no exception. The caller (the worker) MUST gate on
-    ``conv.draft_payload["gaps"]`` being empty before calling this -- never rely
-    on a validation error to signal an incomplete draft. Pydantic will still
-    raise for genuinely malformed inputs (e.g. a non-UUID ``customer_id``).
+    The caller (the worker) MUST gate on ``conv.draft_payload["gaps"]`` being
+    empty and at least one line item present before calling this. As a
+    defense-in-depth backstop, ``InvoiceCreate`` now enforces
+    ``line_items`` min length 1 and bounds every numeric field, so a
+    malformed / empty draft raises ``pydantic.ValidationError`` here rather
+    than producing a bad invoice downstream.
     """
     payload = conv.draft_payload or {}
 
