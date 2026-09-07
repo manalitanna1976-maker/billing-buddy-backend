@@ -72,6 +72,22 @@ def test_far_future_invoice_date_is_422(client):
     assert client.post("/invoices", headers=h, json=body).status_code == 422
 
 
+def test_non_finite_number_is_422_not_500(client):
+    """A bare JSON `1e400` parses to inf; the validation-error response must
+    still serialise (was a 500 from the JSON encoder choking on inf)."""
+    h = _headers(client, email="inf@fix.test")
+    cid = _customer(client, h)
+    raw = (
+        '{"customer_id":"%s","invoice_date":"%s",'
+        '"line_items":[{"product_name":"x","qty":1,"price":1e400,"gst_rate":18}]}'
+        % (cid, date.today().isoformat())
+    )
+    r = client.post(
+        "/invoices", headers={**h, "Content-Type": "application/json"}, content=raw
+    )
+    assert r.status_code == 422, r.text
+
+
 # --- FB-6: unknown / foreign bank_account_id -> 404 ------------------------- #
 
 def test_unknown_bank_account_is_404(client):

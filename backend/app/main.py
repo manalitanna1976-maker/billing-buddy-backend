@@ -3,6 +3,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -31,6 +32,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request: Request, exc: RequestValidationError):
+    # The default handler serialises exc.errors() verbatim, which can contain a
+    # non-finite float `input` (e.g. a client sending 1e400) -> the JSON encoder
+    # then raises and turns a clean 422 into a 500. Stringify every `input`.
+    clean = []
+    for err in exc.errors():
+        e = dict(err)
+        if "input" in e:
+            try:
+                import math
+
+                if isinstance(e["input"], float) and not math.isfinite(e["input"]):
+                    e["input"] = str(e["input"])
+            except Exception:
+                e["input"] = repr(e["input"])
+        e.pop("ctx", None)
+        e.pop("url", None)
+        clean.append(e)
+    return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": clean})
 
 
 @app.exception_handler(IntegrityError)
