@@ -40,7 +40,9 @@ on a session that has other uncommitted work you don't want committed.
 """
 
 import hashlib
-from datetime import datetime, timedelta
+from datetime import timedelta
+
+from app.time_utils import utcnow
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -96,7 +98,7 @@ def _global_prune(db: Session) -> None:
     global delete run on every write, so orphan buckets that are never
     retried still age out without a scheduler.
     """
-    cutoff = datetime.utcnow() - timedelta(
+    cutoff = utcnow() - timedelta(
         seconds=max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS, WHATSAPP_WINDOW_SECONDS, SIGNUP_WINDOW_SECONDS)
     )
     db.execute(delete(RateLimitEvent).where(RateLimitEvent.occurred_at <= cutoff))
@@ -113,7 +115,7 @@ def add_events(db: Session, bucket_keys: list[str]) -> None:
     commit -- the caller owns the transaction.
     """
     for k in bucket_keys:
-        db.add(RateLimitEvent(bucket_key=k, occurred_at=datetime.utcnow()))
+        db.add(RateLimitEvent(bucket_key=k, occurred_at=utcnow()))
     db.flush()
     _global_prune(db)
 
@@ -130,7 +132,7 @@ def count_in_window(db: Session, bucket_key: str, window_seconds: int) -> int:
     """Number of events recorded for `bucket_key` within the last
     `window_seconds` seconds.
     """
-    threshold = datetime.utcnow() - timedelta(seconds=window_seconds)
+    threshold = utcnow() - timedelta(seconds=window_seconds)
     return db.execute(
         select(func.count())
         .select_from(RateLimitEvent)
@@ -176,7 +178,7 @@ def sweep_expired(db: Session) -> int:
 
     Commits the caller's session.
     """
-    cutoff = datetime.utcnow() - timedelta(
+    cutoff = utcnow() - timedelta(
         seconds=max(EMAIL_WINDOW_SECONDS, IP_WINDOW_SECONDS, WHATSAPP_WINDOW_SECONDS, SIGNUP_WINDOW_SECONDS)
     )
     result = db.execute(

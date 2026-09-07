@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from jose import JWTError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import get_db
-from app.deps import oauth2_scheme
+from app.deps import get_current_business, oauth2_scheme
 from app.models import Business, User
 from app.rate_limit import (
     is_login_rate_limited,
@@ -19,14 +20,31 @@ from app.token_revocation import revoke_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+_settings = get_settings()
 
 already_registered = HTTPException(
     status_code=status.HTTP_409_CONFLICT, detail="Email already registered"
 )
 
 
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=_settings.session_cookie_name,
+        value=token,
+        httponly=True,
+        secure=_settings.session_cookie_secure,
+        samesite=_settings.session_cookie_samesite,
+        max_age=_settings.jwt_expire_minutes * 60,
+        path="/",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(key=_settings.session_cookie_name, path="/")
+
+
 @router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-def signup(body: SignupRequest, request: Request, db: Session = Depends(get_db)):
+def signup(body: SignupRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     client_ip = request.client.host if request.client else "unknown"
     if is_signup_rate_limited(db, client_ip):
         raise HTTPException(
@@ -57,11 +75,12 @@ def signup(body: SignupRequest, request: Request, db: Session = Depends(get_db))
         raise already_registered
 
     token = create_access_token(user_id=user.id, business_id=business.id)
+    _set_session_cookie(response, token)
     return TokenResponse(access_token=token)
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
+def login(body: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     client_ip = request.client.host if request.client else "unknown"
 
     # See app/rate_limit.py for the policy and rationale (per-email +
@@ -87,17 +106,40 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
 
     reset_failed_logins(db, body.email)
     token = create_access_token(user_id=user.id, business_id=user.business_id)
+    _set_session_cookie(response, token)
     return TokenResponse(access_token=token)
 
 
+@router.get("/me")
+def me(
+    request: Request,
+    business: Business = Depends(get_current_business),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.business_id == business.id).first()
+    return {
+        "business_id": str(business.id),
+        "business_name": business.name,
+        "email": user.email if user else None,
+    }
+
+
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+def logout(
+    response: Response,
+    request: Request,
+    token: str | None = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
+    raw = token or request.cookies.get(_settings.session_cookie_name)
+    _clear_session_cookie(response)
+    if not raw:
+        return
     try:
-        payload = decode_access_token(token)
+        payload = decode_access_token(raw)
         jti = payload["jti"]
         exp = payload["exp"]
     except (JWTError, KeyError):
         # Already invalid, malformed, or expired -- nothing to revoke.
-        # Logout is idempotent: either way, this token can't be used again.
         return
     revoke_token(db, jti, exp)

@@ -12,6 +12,12 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 1440
     upload_dir: str = "uploads"
     cors_origins: list[str] = ["http://localhost:5173"]
+    # Session cookie. `secure` must be True in any HTTPS deployment; left False
+    # so local http://localhost dev works. `samesite=lax` blocks the cookie
+    # from riding cross-site POST/PUT/DELETE requests, which is the CSRF guard.
+    session_cookie_name: str = "bb_session"
+    session_cookie_secure: bool = False
+    session_cookie_samesite: str = "lax"
     # Comma-separated list of Fernet keys, newest first. One key is the common
     # case; a second (old) key is kept during rotation so ciphertext written
     # under it still decrypts until it has all been re-encrypted. See

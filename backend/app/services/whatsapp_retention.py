@@ -18,14 +18,16 @@ leaves a conversation stuck in ``confirmed`` with ``invoice_id IS NULL``; left
 alone, a stale Edit/Confirm could re-confirm off the frozen draft) and folds in
 the two prereq security sweeps (``rate_limit`` / ``token_revocation``).
 
-Timestamps use ``datetime.utcnow()`` on the Python side to match the rest of the
+Timestamps use ``utcnow()`` on the Python side to match the rest of the
 codebase (naive UTC everywhere). Returns a counts dict for the worker log.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
+
+from app.time_utils import utcnow
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
@@ -37,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 def retention_sweep(db: Session) -> dict:
-    now = datetime.utcnow()
+    now = utcnow()
     cutoff_24h = now - timedelta(hours=24)
     cutoff_15m = now - timedelta(minutes=15)
     cutoff_30d = now - timedelta(days=30)

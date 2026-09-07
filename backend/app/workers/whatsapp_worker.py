@@ -33,6 +33,8 @@ import logging
 import time
 from datetime import datetime
 
+from app.time_utils import utcnow
+
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
@@ -68,7 +70,7 @@ def run_once(db: Session) -> bool:
             for payload in payloads:
                 jobs.build(db, "outbound_send", payload, job.business_id)
             job.status = "done"
-            job.processed_at = datetime.utcnow()
+            job.processed_at = utcnow()
             db.commit()
             logger.info(
                 "whatsapp worker processed job=%s type=inbound_message business=%s "

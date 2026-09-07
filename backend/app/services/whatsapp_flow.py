@@ -37,7 +37,9 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import timedelta
+
+from app.time_utils import utcnow
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.orm import Session
@@ -354,7 +356,7 @@ def handle_confirm(db: Session, conv, business) -> list[dict]:
     # the create was lost: drive it terminal with a failure reply so the confirm
     # is never silently dropped (I3).
     if conv.state == "confirmed":
-        stale_cutoff = datetime.utcnow() - timedelta(minutes=15)
+        stale_cutoff = utcnow() - timedelta(minutes=15)
         if conv.updated_at is not None and conv.updated_at < stale_cutoff:
             conv.state = "terminal"
             conv.last_result_payload = _text(

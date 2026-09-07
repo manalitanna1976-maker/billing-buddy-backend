@@ -1,6 +1,6 @@
 """Task B6: whatsapp_retention.retention_sweep -- periodic PII/garbage cleanup."""
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from app.models import (
@@ -53,7 +53,7 @@ def _conv(db, business, sender, *, state="collecting", expires_at, updated_at, i
 
 def test_retention_deletes_expired_and_old_confirmed(db_session):
     b = _biz(db_session)
-    now = datetime.utcnow()
+    now = datetime.now(UTC).replace(tzinfo=None)
 
     expired = _conv(
         db_session, b, "+91900000001",
@@ -80,7 +80,7 @@ def test_retention_deletes_expired_and_old_confirmed(db_session):
 
 def test_retention_resets_stranded_confirms(db_session):
     b = _biz(db_session)
-    now = datetime.utcnow()
+    now = datetime.now(UTC).replace(tzinfo=None)
 
     stranded = _conv(
         db_session, b, "+91900000010", state="confirmed", invoice_id=None,
@@ -105,7 +105,7 @@ def test_retention_resets_collecting_row_with_invoice_id(db_session):
     invoice_id set (the confirm split-window race) and idle past 15 min is reset
     to terminal by the sweep."""
     b = _biz(db_session)
-    now = datetime.utcnow()
+    now = datetime.now(UTC).replace(tzinfo=None)
     inv_id = _invoice(db_session, b).id
 
     stuck = _conv(
@@ -128,7 +128,7 @@ def test_retention_resets_collecting_row_with_invoice_id(db_session):
 
 def test_retention_message_log_never_has_body(db_session):
     b = _biz(db_session)
-    now = datetime.utcnow()
+    now = datetime.now(UTC).replace(tzinfo=None)
 
     gone_conv_id = _conv(
         db_session, b, "+91900000020",
@@ -162,7 +162,7 @@ def test_retention_message_log_never_has_body(db_session):
 
 def test_retention_deletes_old_done_and_dead_letter_jobs(db_session):
     b = _biz(db_session)
-    now = datetime.utcnow()
+    now = datetime.now(UTC).replace(tzinfo=None)
 
     done_old = WhatsAppJob(
         type="inbound_message",
@@ -209,7 +209,7 @@ def test_retention_deletes_old_done_and_dead_letter_jobs(db_session):
 
 
 def test_retention_folds_in_prereq_sweeps(db_session):
-    now = datetime.utcnow()
+    now = datetime.now(UTC).replace(tzinfo=None)
     db_session.add(RevokedToken(jti="expired-jti", expires_at=now - timedelta(hours=1)))
     db_session.add(RevokedToken(jti="live-jti", expires_at=now + timedelta(hours=1)))
     db_session.commit()

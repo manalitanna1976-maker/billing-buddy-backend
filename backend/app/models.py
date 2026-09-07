@@ -1,6 +1,9 @@
 import uuid
 from datetime import date, datetime
+
 from decimal import Decimal
+
+from app.time_utils import utcnow
 
 from sqlalchemy import (
     Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, text,
@@ -30,7 +33,7 @@ class Business(Base):
     invoice_prefix: Mapped[str] = mapped_column(String(20), default="")
     invoice_postfix: Mapped[str] = mapped_column(String(20), default="")
     next_invoice_seq: Mapped[int] = mapped_column(Integer, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class User(Base):
@@ -40,7 +43,7 @@ class User(Base):
     business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("businesses.id"), index=True)
     email: Mapped[str] = mapped_column(String(200), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(200))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class BankAccount(Base):
@@ -69,7 +72,7 @@ class Customer(Base):
     place_of_supply: Mapped[str | None] = mapped_column(String(100), nullable=True)
     reverse_charge: Mapped[bool] = mapped_column(Boolean, default=False)
     ship_to: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class Invoice(Base):
@@ -126,7 +129,7 @@ class Invoice(Base):
     payment_type: Mapped[str] = mapped_column(String(10), default="credit")
     status: Mapped[str] = mapped_column(String(10), default="draft")  # draft | saved | cancelled
     finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     line_items: Mapped[list["InvoiceLineItem"]] = relationship(
         back_populates="invoice", cascade="all, delete-orphan", order_by="InvoiceLineItem.sr_no"
@@ -159,7 +162,7 @@ class RateLimitEvent(Base):
 
     id: Mapped[uuid.UUID] = uuid_pk()
     bucket_key: Mapped[str] = mapped_column(String(255))
-    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class InvoiceLineItem(Base):
@@ -212,9 +215,9 @@ class WhatsAppConnection(Base):
     waba_id: Mapped[str] = mapped_column(String(64))
     access_token_encrypted: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), default="active")  # active | disconnected
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime, default=utcnow, onupdate=utcnow
     )
 
 
@@ -229,7 +232,7 @@ class WhatsAppAuthorizedSender(Base):
     id: Mapped[uuid.UUID] = uuid_pk()
     business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("businesses.id"), index=True)
     phone_e164: Mapped[str] = mapped_column(String(20))
-    enrolled_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    enrolled_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     enrolled_by: Mapped[str] = mapped_column(String(200))  # business session email, for audit
 
 
@@ -253,9 +256,9 @@ class WhatsAppConversation(Base):
     )
     last_result_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime, default=utcnow, onupdate=utcnow
     )
 
 
@@ -270,7 +273,7 @@ class WhatsAppMessageLog(Base):
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("whatsapp_conversations.id"), nullable=True
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class WhatsAppJob(Base):
@@ -298,5 +301,5 @@ class WhatsAppJob(Base):
         ForeignKey("businesses.id"), nullable=True, index=True
     )
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

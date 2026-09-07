@@ -30,6 +30,8 @@ import logging
 import uuid
 from datetime import datetime
 
+from app.time_utils import utcnow
+
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
@@ -124,7 +126,7 @@ def handle_outbound(db: Session, job: WhatsAppJob) -> None:
         )
 
     job.status = "done"
-    job.processed_at = datetime.utcnow()
+    job.processed_at = utcnow()
     db.commit()
     logger.info(
         "whatsapp outbound sent kind=%s business=%s wa_message_id=%s",

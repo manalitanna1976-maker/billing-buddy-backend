@@ -25,7 +25,9 @@ Transaction contract: the mutating helpers here (`revoke_token`,
 a session that has other uncommitted work you don't want committed.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
+
+from app.time_utils import utcnow
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -42,11 +44,11 @@ def revoke_token(db: Session, jti: str, exp: float) -> None:
 
     Commits the caller's session.
     """
-    now = datetime.utcnow()
+    now = utcnow()
     db.execute(delete(RevokedToken).where(RevokedToken.expires_at <= now))
     db.execute(
         pg_insert(RevokedToken)
-        .values(jti=jti, expires_at=datetime.utcfromtimestamp(exp))
+        .values(jti=jti, expires_at=datetime.fromtimestamp(exp, UTC).replace(tzinfo=None))
         .on_conflict_do_nothing(index_elements=["jti"])
     )
     db.commit()
@@ -57,7 +59,7 @@ def is_token_revoked(db: Session, jti: str) -> bool:
     row = db.execute(
         select(RevokedToken.jti).where(
             RevokedToken.jti == jti,
-            RevokedToken.expires_at > datetime.utcnow(),
+            RevokedToken.expires_at > utcnow(),
         )
     ).first()
     return row is not None
@@ -70,7 +72,7 @@ def sweep_expired(db: Session) -> int:
     Commits the caller's session.
     """
     result = db.execute(
-        delete(RevokedToken).where(RevokedToken.expires_at <= datetime.utcnow())
+        delete(RevokedToken).where(RevokedToken.expires_at <= utcnow())
     )
     db.commit()
     return result.rowcount

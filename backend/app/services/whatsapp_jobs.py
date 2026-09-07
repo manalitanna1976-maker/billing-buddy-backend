@@ -23,7 +23,9 @@ transaction (the webhook folds the job insert into its per-message tx).
 
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import timedelta
+
+from app.time_utils import utcnow
 
 import httpx
 from sqlalchemy import select
@@ -97,7 +99,7 @@ def claim_next(db: Session) -> WhatsAppJob | None:
     concurrent claimer for the whole claim, not just the read.
     """
     settings = config.get_settings()
-    stale_cutoff = datetime.utcnow() - timedelta(
+    stale_cutoff = utcnow() - timedelta(
         seconds=settings.whatsapp_job_stale_claim_seconds
     )
 
@@ -116,7 +118,7 @@ def claim_next(db: Session) -> WhatsAppJob | None:
         return None
 
     job.status = "processing"
-    job.claimed_at = datetime.utcnow()
+    job.claimed_at = utcnow()
     job.attempts += 1
     db.commit()
     db.refresh(job)
@@ -126,7 +128,7 @@ def claim_next(db: Session) -> WhatsAppJob | None:
 def complete(db: Session, job: WhatsAppJob) -> None:
     """Mark a job done and commit the caller's session."""
     job.status = "done"
-    job.processed_at = datetime.utcnow()
+    job.processed_at = utcnow()
     db.commit()
 
 

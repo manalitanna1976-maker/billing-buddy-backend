@@ -1,6 +1,5 @@
 import re
 import uuid
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
@@ -22,6 +21,7 @@ from app.services.invoices import (
     snapshot_bill_to,
 )
 from app.services.pdf import render_invoice_pdf
+from app.time_utils import utcnow
 
 router = APIRouter(prefix="/invoices", tags=["invoices"])
 
@@ -189,7 +189,7 @@ def finalize_invoice(
             detail="cannot finalize an invoice with no line items",
         )
     invoice.status = "saved"
-    invoice.finalized_at = datetime.utcnow()
+    invoice.finalized_at = utcnow()
     db.commit()
     db.refresh(invoice)
     return invoice

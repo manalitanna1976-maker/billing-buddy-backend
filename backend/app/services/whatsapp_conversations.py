@@ -25,7 +25,10 @@ attribute.
 
 import uuid
 from datetime import date, datetime, timedelta
+
 from decimal import Decimal
+
+from app.time_utils import utcnow
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -70,7 +73,7 @@ def get_locked(
             sender_phone_e164=sender_e164,
             state="collecting",
             draft_payload={},
-            expires_at=datetime.utcnow() + _ttl(),
+            expires_at=utcnow() + _ttl(),
         )
         .on_conflict_do_nothing(index_elements=["business_id", "sender_phone_e164"])
     )
@@ -79,12 +82,12 @@ def get_locked(
 
 
 def is_expired(conv: WhatsAppConversation, now: datetime | None = None) -> bool:
-    return (now or datetime.utcnow()) > conv.expires_at
+    return (now or utcnow()) > conv.expires_at
 
 
 def touch(conv: WhatsAppConversation) -> None:
     """Extend the TTL window (a fresh inbound message keeps the draft alive)."""
-    conv.expires_at = datetime.utcnow() + _ttl()
+    conv.expires_at = utcnow() + _ttl()
 
 
 def _line_items_to_json(proposed: ProposedDraft) -> list[dict]:

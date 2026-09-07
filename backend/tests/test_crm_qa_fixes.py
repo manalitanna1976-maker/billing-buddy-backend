@@ -263,3 +263,25 @@ def test_meta_states(client):
     data = r.json()
     assert len(data) == 37
     assert {"code": "27", "name": "Maharashtra", "value": "27-Maharashtra"} in data
+
+
+# --- NF-3: httpOnly session cookie auth ------------------------------- #
+
+def test_login_sets_httponly_cookie_and_it_authenticates(client):
+    client.post(
+        "/auth/signup",
+        json={"business_name": "Ck", "email": "cookie@fix.test", "password": "pass1234"},
+    )
+    # fresh client instance would drop the cookie jar; reuse `client` which keeps it
+    lr = client.post("/auth/login", json={"email": "cookie@fix.test", "password": "pass1234"})
+    assert lr.status_code == 200
+    set_cookie = lr.headers.get("set-cookie", "")
+    assert "bb_session=" in set_cookie and "HttpOnly" in set_cookie
+
+    # no Authorization header -> the cookie alone authenticates
+    me = client.get("/auth/me")
+    assert me.status_code == 200
+    assert me.json()["email"] == "cookie@fix.test"
+
+    client.post("/auth/logout")
+    assert client.get("/auth/me").status_code == 401

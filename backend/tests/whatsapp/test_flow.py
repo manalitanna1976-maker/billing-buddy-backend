@@ -329,12 +329,12 @@ def test_button_confirm_wrong_state_reasks(db_session):
 # expiry
 # --------------------------------------------------------------------------- #
 def test_expired_awaiting_confirm_goes_terminal(db_session, monkeypatch):
-    from datetime import datetime, timedelta
+    from datetime import UTC, datetime, timedelta
 
     b = _biz(db_session)
     conv = _conv(db_session, b)
     conv.state = "awaiting_confirm"
-    conv.expires_at = datetime.utcnow() - timedelta(minutes=1)
+    conv.expires_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=1)
 
     def _boom(*a, **k):
         raise AssertionError("parse_message must not be called for an expired draft")
@@ -395,7 +395,7 @@ def test_expired_collecting_starts_fresh(db_session, monkeypatch):
     stale draft_payload must not merge into the new message, and must not be
     re-sent to Claude as prior_draft (spec: unusable for drafting 30 min after
     the last message)."""
-    from datetime import datetime, timedelta
+    from datetime import UTC, datetime, timedelta
 
     b = _biz(db_session)
     cust = _cust(db_session, b)
@@ -406,7 +406,7 @@ def test_expired_collecting_starts_fresh(db_session, monkeypatch):
         "gaps": [],
     }
     conv.state = "collecting"
-    conv.expires_at = datetime.utcnow() - timedelta(minutes=1)
+    conv.expires_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=1)
     db_session.flush()
 
     seen = {}

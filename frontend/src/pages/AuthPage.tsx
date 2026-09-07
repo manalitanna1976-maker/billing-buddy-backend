@@ -1,10 +1,10 @@
-import { useMutation } from "@tanstack/react-query";
-import { isAxiosError } from "axios";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { login, signup } from "../api/auth";
+import { getErrorMessage } from "../lib/apiError";
 import { useAuthStore } from "../store/authStore";
 import { inputClass, labelClass, primaryButtonClass } from "../styles";
 
@@ -18,6 +18,11 @@ interface SignupValues {
   email: string;
   password: string;
   confirm_password: string;
+}
+
+function FieldError({ message }: { message?: string }) {
+  if (!message) return null;
+  return <p className="mt-1 text-sm text-danger">{message}</p>;
 }
 
 function TabButton({
@@ -43,24 +48,11 @@ function TabButton({
   );
 }
 
-// The backend rate-limits repeated failed logins (per email and per IP —
-// see backend/app/rate_limit.py) and returns 429 with a specific `detail`
-// once the caller is locked out. Surface that distinctly from a plain
-// wrong-password 401 so the user knows to wait rather than re-guessing.
-function loginErrorMessage(error: unknown): string {
-  if (isAxiosError(error) && error.response?.status === 429) {
-    return (
-      (error.response.data as { detail?: string } | undefined)?.detail ??
-      "Too many login attempts. Please wait a few minutes and try again."
-    );
-  }
-  return "Invalid email or password.";
-}
-
 export default function AuthPage() {
   const location = useLocation();
   const navigate = useNavigate();
-  const setToken = useAuthStore((s) => s.setToken);
+  const queryClient = useQueryClient();
+  const setAuthed = useAuthStore((s) => s.setAuthed);
   const setEmail = useAuthStore((s) => s.setEmail);
   const [tab, setTab] = useState<"login" | "signup">(
     location.pathname === "/signup" ? "signup" : "login",
@@ -69,22 +61,21 @@ export default function AuthPage() {
   const loginForm = useForm<LoginValues>();
   const signupForm = useForm<SignupValues>();
 
+  async function onAuthed(email: string) {
+    setEmail(email);
+    setAuthed(true);
+    await queryClient.invalidateQueries({ queryKey: ["auth", "me"] });
+    navigate("/");
+  }
+
   const loginMutation = useMutation({
     mutationFn: login,
-    onSuccess: (data, variables) => {
-      setToken(data.access_token);
-      setEmail(variables.email);
-      navigate("/");
-    },
+    onSuccess: (_d, variables) => onAuthed(variables.email),
   });
 
   const signupMutation = useMutation({
     mutationFn: signup,
-    onSuccess: (data, variables) => {
-      setToken(data.access_token);
-      setEmail(variables.email);
-      navigate("/");
-    },
+    onSuccess: (_d, variables) => onAuthed(variables.email),
   });
 
   return (
@@ -129,24 +120,28 @@ export default function AuthPage() {
                 <label htmlFor="login-email" className={labelClass}>Email</label>
                 <input
                   id="login-email"
-                  {...loginForm.register("email", { required: true })}
+                  {...loginForm.register("email", { required: "Email is required" })}
                   type="email"
                   autoComplete="email"
                   className={inputClass}
                 />
+                <FieldError message={loginForm.formState.errors.email?.message} />
               </div>
               <div>
                 <label htmlFor="login-password" className={labelClass}>Password</label>
                 <input
                   id="login-password"
-                  {...loginForm.register("password", { required: true })}
+                  {...loginForm.register("password", { required: "Password is required" })}
                   type="password"
                   autoComplete="current-password"
                   className={inputClass}
                 />
+                <FieldError message={loginForm.formState.errors.password?.message} />
               </div>
               {loginMutation.isError && (
-                <p className="text-sm text-danger">{loginErrorMessage(loginMutation.error)}</p>
+                <p className="text-sm text-danger">
+                  {getErrorMessage(loginMutation.error, "Invalid email or password.")}
+                </p>
               )}
               <button
                 type="submit"
@@ -172,48 +167,53 @@ export default function AuthPage() {
                 <label htmlFor="signup-business-name" className={labelClass}>Business name</label>
                 <input
                   id="signup-business-name"
-                  {...signupForm.register("business_name", { required: true })}
+                  {...signupForm.register("business_name", { required: "Business name is required" })}
                   className={inputClass}
                 />
+                <FieldError message={signupForm.formState.errors.business_name?.message} />
               </div>
               <div>
                 <label htmlFor="signup-email" className={labelClass}>Work email</label>
                 <input
                   id="signup-email"
-                  {...signupForm.register("email", { required: true })}
+                  {...signupForm.register("email", {
+                    required: "Email is required",
+                    pattern: { value: /^[^@\s]+@[^@\s]+\.[^@\s]+$/, message: "Enter a valid email" },
+                  })}
                   type="email"
                   autoComplete="email"
                   className={inputClass}
                 />
+                <FieldError message={signupForm.formState.errors.email?.message} />
               </div>
               <div>
                 <label htmlFor="signup-password" className={labelClass}>Password</label>
                 <input
                   id="signup-password"
-                  {...signupForm.register("password", { required: true, minLength: 8 })}
+                  {...signupForm.register("password", {
+                    required: "Password is required",
+                    minLength: { value: 8, message: "Password must be at least 8 characters" },
+                  })}
                   type="password"
                   autoComplete="new-password"
                   className={inputClass}
                 />
+                <FieldError message={signupForm.formState.errors.password?.message} />
               </div>
               <div>
                 <label htmlFor="signup-confirm-password" className={labelClass}>Confirm password</label>
                 <input
                   id="signup-confirm-password"
-                  {...signupForm.register("confirm_password", { required: true })}
+                  {...signupForm.register("confirm_password", { required: "Please confirm your password" })}
                   type="password"
                   autoComplete="new-password"
                   className={inputClass}
                 />
-                {signupForm.formState.errors.confirm_password && (
-                  <p className="mt-1 text-sm text-danger">
-                    {signupForm.formState.errors.confirm_password.message}
-                  </p>
-                )}
+                <FieldError message={signupForm.formState.errors.confirm_password?.message} />
               </div>
               {signupMutation.isError && (
                 <p className="text-sm text-danger">
-                  Could not sign up — email may already be registered.
+                  {getErrorMessage(signupMutation.error, "Could not sign up — please try again.")}
                 </p>
               )}
               <button

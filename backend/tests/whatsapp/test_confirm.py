@@ -7,7 +7,7 @@ that behaviour: exactly one invoice per draft, a double tap re-sends the stored
 result, and a concurrent worker that is mid-create is a no-op.
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -438,7 +438,7 @@ def test_confirm_stale_confirmed_split_is_driven_terminal(db_session):
     conv = _awaiting_conv(db_session, b, cust)
     conv.state = "confirmed"
     conv.invoice_id = None
-    conv.updated_at = datetime.utcnow() - timedelta(minutes=20)
+    conv.updated_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=20)
     db_session.flush()
 
     out = flow.handle_confirm(db_session, conv, b)
@@ -460,7 +460,7 @@ def test_stale_reclaim_after_invoice_created_resends_pdf(db_session):
     out1 = flow.handle_confirm(db_session, conv, b)
     assert out1[0]["then_document_invoice_id"]
 
-    conv.expires_at = datetime.utcnow() - timedelta(minutes=1)
+    conv.expires_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=1)
     db_session.flush()
 
     out2 = flow.handle_inbound(db_session, _confirm_payload(b))

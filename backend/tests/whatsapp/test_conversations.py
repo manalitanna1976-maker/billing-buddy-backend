@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -38,7 +38,7 @@ def test_get_locked_upserts_once(db_session):
         .all()
     )
     assert len(rows) == 1
-    assert c1.expires_at > datetime.utcnow() + timedelta(minutes=25)
+    assert c1.expires_at > datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=25)
 
 
 def test_get_locked_row_is_lockable(db_session):
@@ -190,14 +190,14 @@ def test_is_expired(db_session):
     b = _biz(db_session)
     conv = conv_store.get_locked(db_session, b.id, "+919000000006")
     assert conv_store.is_expired(conv) is False
-    future = datetime.utcnow() + timedelta(minutes=999)
+    future = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=999)
     assert conv_store.is_expired(conv, now=future) is True
 
 
 def test_touch_extends_expiry(db_session):
     b = _biz(db_session)
     conv = conv_store.get_locked(db_session, b.id, "+919000000007")
-    conv.expires_at = datetime.utcnow() - timedelta(minutes=1)
+    conv.expires_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=1)
     assert conv_store.is_expired(conv) is True
     conv_store.touch(conv)
     assert conv_store.is_expired(conv) is False
