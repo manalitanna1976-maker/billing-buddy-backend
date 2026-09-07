@@ -9,6 +9,8 @@ import {
   updateBankAccount,
 } from "../api/bankAccounts";
 import AppShell from "../components/AppShell";
+import { getErrorMessage } from "../lib/apiError";
+import { ifscRule } from "../lib/validators";
 import {
   cardClass,
   cardTitleClass,
@@ -30,7 +32,12 @@ export default function BankAccountsPage() {
     queryKey: ["bank-accounts"],
     queryFn: listBankAccounts,
   });
-  const { register, handleSubmit, reset } = useForm<Omit<BankAccount, "id">>({
+  const {
+    register,
+    handleSubmit,
+    reset,
+    formState: { errors },
+  } = useForm<Omit<BankAccount, "id">>({
     defaultValues: { bank_name: "", account_no: "", ifsc: "", is_default: false },
   });
 
@@ -118,20 +125,31 @@ export default function BankAccountsPage() {
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div>
               <label className={labelClass}>Bank name</label>
-              <input {...register("bank_name", { required: true })} className={inputClass} />
+              <input {...register("bank_name", { required: "Bank name is required" })} className={inputClass} />
             </div>
             <div>
               <label className={labelClass}>Account number</label>
-              <input {...register("account_no", { required: true })} className={inputClass} />
+              <input {...register("account_no", { required: "Account number is required" })} className={inputClass} />
             </div>
             <div>
               <label className={labelClass}>IFSC</label>
-              <input {...register("ifsc", { required: true })} className={inputClass} />
+              <input {...register("ifsc", { required: "IFSC is required", ...ifscRule })} className={inputClass} />
+              {errors.ifsc?.message && (
+                <p className="mt-1 text-sm text-danger">{errors.ifsc.message as string}</p>
+              )}
             </div>
           </div>
+          {(errors.bank_name || errors.account_no) && (
+            <p className="mt-2 text-sm text-danger">Bank name and account number are required.</p>
+          )}
           <label className="mt-3 flex items-center gap-2 text-sm text-ink">
             <input type="checkbox" {...register("is_default")} /> Set as default account
           </label>
+          {createMutation.isError && (
+            <p className="mt-2 text-sm text-danger">
+              {getErrorMessage(createMutation.error, "Could not add the bank account.")}
+            </p>
+          )}
           <button
             type="submit"
             disabled={createMutation.isPending}

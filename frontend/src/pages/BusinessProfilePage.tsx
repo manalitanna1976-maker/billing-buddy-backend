@@ -1,5 +1,4 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import axios from "axios";
 import { useEffect, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 
@@ -12,27 +11,12 @@ import {
   uploadSignature,
 } from "../api/business";
 import AppShell from "../components/AppShell";
+import StateSelect from "../components/StateSelect";
+import { getErrorMessage } from "../lib/apiError";
+import { gstinRule } from "../lib/validators";
 import { cardClass, cardTitleClass, inputClass, labelClass, primaryButtonClass } from "../styles";
 
 const API_URL = import.meta.env.VITE_API_URL as string;
-
-// The backend returns errors in two shapes depending on where validation
-// happens: a plain string `detail` for hand-raised HTTPExceptions (e.g. the
-// upload magic-byte check), and a list of pydantic validation error objects
-// for request-schema failures. Normalize both into one string so callers
-// don't have to special-case the response shape.
-function getErrorMessage(error: unknown, fallback: string): string {
-  if (axios.isAxiosError(error)) {
-    const detail = error.response?.data?.detail;
-    if (typeof detail === "string") return detail;
-    if (Array.isArray(detail)) {
-      const msgs = detail.map((d) => (typeof d?.msg === "string" ? d.msg : null)).filter(Boolean);
-      if (msgs.length) return msgs.join(", ");
-    }
-    if (error.response?.status === undefined) return "Network error — please check your connection and try again.";
-  }
-  return fallback;
-}
 
 function UploadBox({
   label,
@@ -110,7 +94,7 @@ function UploadBox({
 export default function BusinessProfilePage() {
   const queryClient = useQueryClient();
   const { data: business, isLoading } = useQuery({ queryKey: ["business"], queryFn: getBusiness });
-  const { register, handleSubmit, reset, formState } = useForm<BusinessUpdateInput>();
+  const { register, handleSubmit, reset, setValue, watch, formState } = useForm<BusinessUpdateInput>();
 
   useEffect(() => {
     if (business) reset(business);
@@ -159,7 +143,10 @@ export default function BusinessProfilePage() {
               </div>
               <div>
                 <label htmlFor="business-gstin" className={labelClass}>GSTIN</label>
-                <input id="business-gstin" {...register("gstin")} maxLength={15} className={inputClass} />
+                <input id="business-gstin" {...register("gstin", gstinRule)} maxLength={15} className={inputClass} />
+                {formState.errors.gstin?.message && (
+                  <p className="mt-1 text-sm text-danger">{formState.errors.gstin.message as string}</p>
+                )}
               </div>
               <div>
                 <label htmlFor="business-address" className={labelClass}>Address</label>
@@ -168,7 +155,7 @@ export default function BusinessProfilePage() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label htmlFor="business-state" className={labelClass}>State</label>
-                  <input id="business-state" {...register("state")} className={inputClass} />
+                  <StateSelect id="business-state" value={watch("state")} onChange={(v) => setValue("state", v, { shouldDirty: true })} />
                 </div>
                 <div>
                   <label htmlFor="business-phone" className={labelClass}>Phone</label>

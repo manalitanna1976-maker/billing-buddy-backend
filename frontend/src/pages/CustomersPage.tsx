@@ -5,6 +5,9 @@ import { useForm } from "react-hook-form";
 import { Customer, CustomerInput, createCustomer, listCustomers, updateCustomer } from "../api/customers";
 import AppShell from "../components/AppShell";
 import InfoTooltip from "../components/InfoTooltip";
+import StateSelect from "../components/StateSelect";
+import { getErrorMessage } from "../lib/apiError";
+import { gstinRule, panRule } from "../lib/validators";
 import {
   cardClass,
   cardTitleClass,
@@ -20,6 +23,8 @@ const REVERSE_CHARGE_HELP =
   "and reports the GST directly instead of the seller collecting it. Applies to specific notified " +
   "goods/services, or when the seller is unregistered.";
 
+const PAGE_SIZE = 25;
+
 const emptyValues: CustomerInput = {
   name: "",
   address: null,
@@ -32,62 +37,72 @@ const emptyValues: CustomerInput = {
   ship_to: null,
 };
 
+function FieldError({ message }: { message?: string }) {
+  if (!message) return null;
+  return <p className="mt-1 text-sm text-danger">{message}</p>;
+}
+
 export default function CustomersPage() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [page, setPage] = useState(0);
   const [editingId, setEditingId] = useState<string | null>(null);
 
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(search), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+  useEffect(() => setPage(0), [debounced]);
+
   const { data: customers = [], isLoading } = useQuery({
-    queryKey: ["customers", "list"],
-    queryFn: listCustomers,
+    queryKey: ["customers", "list", { debounced, page }],
+    queryFn: () =>
+      listCustomers({ limit: PAGE_SIZE + 1, offset: page * PAGE_SIZE, q: debounced || undefined }),
+    placeholderData: (prev) => prev,
   });
+  const hasNext = customers.length > PAGE_SIZE;
+  const rows = customers.slice(0, PAGE_SIZE);
 
-  const { register, handleSubmit, reset } = useForm<CustomerInput>({ defaultValues: emptyValues });
+  const {
+    register,
+    handleSubmit,
+    reset,
+    control,
+    setValue,
+    watch,
+    formState: { errors },
+  } = useForm<CustomerInput>({ defaultValues: emptyValues });
+  void control;
 
-  const createMutation = useMutation({
-    mutationFn: createCustomer,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["customers"] });
-      reset(emptyValues);
-    },
-  });
+  const onDone = () => {
+    queryClient.invalidateQueries({ queryKey: ["customers"] });
+    setEditingId(null);
+    reset(emptyValues);
+  };
 
+  const createMutation = useMutation({ mutationFn: createCustomer, onSuccess: onDone });
   const updateMutation = useMutation({
-    mutationFn: ({ id, body }: { id: string; body: Partial<CustomerInput> }) =>
-      updateCustomer(id, body),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["customers"] });
-      setEditingId(null);
-      reset(emptyValues);
-    },
+    mutationFn: ({ id, body }: { id: string; body: Partial<CustomerInput> }) => updateCustomer(id, body),
+    onSuccess: onDone,
   });
+  const mutationError =
+    (createMutation.isError && getErrorMessage(createMutation.error, "Could not add customer.")) ||
+    (updateMutation.isError && getErrorMessage(updateMutation.error, "Could not save customer.")) ||
+    null;
 
   function startEdit(customer: Customer) {
     setEditingId(customer.id);
-    reset({
-      name: customer.name,
-      address: customer.address,
-      contact_person: customer.contact_person,
-      phone: customer.phone,
-      gstin: customer.gstin,
-      pan: customer.pan,
-      place_of_supply: customer.place_of_supply,
-      reverse_charge: customer.reverse_charge,
-      ship_to: customer.ship_to,
-    });
+    reset({ ...customer } as CustomerInput);
   }
-
   function cancelEdit() {
     setEditingId(null);
     reset(emptyValues);
   }
 
-  useEffect(() => {
-    // Reset editing state if the app navigates away and back.
-    return () => setEditingId(null);
-  }, []);
+  useEffect(() => () => setEditingId(null), []);
 
-  const filtered = customers.filter((c) => c.name.toLowerCase().includes(search.toLowerCase()));
+  const placeOfSupply = watch("place_of_supply");
 
   return (
     <AppShell title="Customers">
@@ -104,49 +119,57 @@ export default function CustomersPage() {
           </div>
           {isLoading ? (
             <p className="text-sm text-ink-muted">Loading…</p>
-          ) : filtered.length === 0 ? (
+          ) : rows.length === 0 ? (
             <p className="text-sm text-ink-muted">No customers found.</p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-border text-xs uppercase tracking-wide text-ink-muted">
-                    <th className="py-2 pr-3 font-medium">Name</th>
-                    <th className="py-2 pr-3 font-medium">Place of supply</th>
-                    <th className="py-2 pr-3 font-medium">GSTIN</th>
-                    <th className="py-2 pr-3 font-medium">PAN</th>
-                    <th className="py-2 pr-3 font-medium">Rev. charge</th>
-                    <th className="py-2 font-medium"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((c) => (
-                    <tr key={c.id} className="border-b border-border last:border-0">
-                      <td className="py-2 pr-3 font-medium">{c.name}</td>
-                      <td className="py-2 pr-3">{c.place_of_supply ?? "—"}</td>
-                      <td className="py-2 pr-3 tabular-nums">{c.gstin ?? "—"}</td>
-                      <td className="py-2 pr-3 tabular-nums">{c.pan ?? "—"}</td>
-                      <td className="py-2 pr-3">{c.reverse_charge ? "Yes" : "No"}</td>
-                      <td className="py-2 text-right">
-                        <button type="button" onClick={() => startEdit(c)} className={linkClass}>
-                          Edit
-                        </button>
-                      </td>
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-border text-xs uppercase tracking-wide text-ink-muted">
+                      <th className="py-2 pr-3 font-medium">Name</th>
+                      <th className="py-2 pr-3 font-medium">Place of supply</th>
+                      <th className="py-2 pr-3 font-medium">GSTIN</th>
+                      <th className="py-2 pr-3 font-medium">PAN</th>
+                      <th className="py-2 pr-3 font-medium">Rev. charge</th>
+                      <th className="py-2 font-medium"></th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {rows.map((c) => (
+                      <tr key={c.id} className="border-b border-border last:border-0">
+                        <td className="py-2 pr-3 font-medium">{c.name}</td>
+                        <td className="py-2 pr-3">{c.place_of_supply ?? "—"}</td>
+                        <td className="py-2 pr-3 tabular-nums">{c.gstin ?? "—"}</td>
+                        <td className="py-2 pr-3 tabular-nums">{c.pan ?? "—"}</td>
+                        <td className="py-2 pr-3">{c.reverse_charge ? "Yes" : "No"}</td>
+                        <td className="py-2 text-right">
+                          <button type="button" onClick={() => startEdit(c)} className={linkClass}>
+                            Edit
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="mt-3 flex justify-end gap-3 text-sm">
+                <button type="button" disabled={page === 0} onClick={() => setPage((p) => p - 1)} className={linkClass + " disabled:opacity-40"}>
+                  ← Prev
+                </button>
+                <span className="text-ink-muted">Page {page + 1}</span>
+                <button type="button" disabled={!hasNext} onClick={() => setPage((p) => p + 1)} className={linkClass + " disabled:opacity-40"}>
+                  Next →
+                </button>
+              </div>
+            </>
           )}
         </div>
 
         <form
           onSubmit={handleSubmit((values) => {
-            if (editingId) {
-              updateMutation.mutate({ id: editingId, body: values });
-            } else {
-              createMutation.mutate(values);
-            }
+            if (editingId) updateMutation.mutate({ id: editingId, body: values });
+            else createMutation.mutate(values);
           })}
           className={cardClass}
         >
@@ -154,7 +177,8 @@ export default function CustomersPage() {
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label className={labelClass}>Name (M/S)</label>
-              <input {...register("name", { required: true })} className={inputClass} />
+              <input {...register("name", { required: "Name is required" })} className={inputClass} />
+              <FieldError message={errors.name?.message} />
             </div>
             <div>
               <label className={labelClass}>Contact person</label>
@@ -170,15 +194,17 @@ export default function CustomersPage() {
             </div>
             <div>
               <label className={labelClass}>Place of supply (state)</label>
-              <input {...register("place_of_supply")} className={inputClass} />
+              <StateSelect value={placeOfSupply} onChange={(v) => setValue("place_of_supply", v)} />
             </div>
             <div>
               <label className={labelClass}>GSTIN</label>
-              <input {...register("gstin")} maxLength={15} className={inputClass} />
+              <input {...register("gstin", gstinRule)} maxLength={15} className={inputClass} />
+              <FieldError message={errors.gstin?.message as string | undefined} />
             </div>
             <div>
               <label className={labelClass}>PAN</label>
-              <input {...register("pan")} maxLength={10} className={inputClass} />
+              <input {...register("pan", panRule)} maxLength={10} className={inputClass} />
+              <FieldError message={errors.pan?.message as string | undefined} />
             </div>
             <div>
               <label className={labelClass}>
@@ -198,6 +224,7 @@ export default function CustomersPage() {
               <input {...register("ship_to")} className={inputClass} />
             </div>
           </div>
+          {mutationError && <p className="mt-3 text-sm text-danger">{mutationError}</p>}
           <div className="mt-4 flex gap-3">
             <button
               type="submit"
@@ -205,12 +232,8 @@ export default function CustomersPage() {
               className={primaryButtonClass}
             >
               {editingId
-                ? updateMutation.isPending
-                  ? "Saving…"
-                  : "Save changes"
-                : createMutation.isPending
-                  ? "Adding…"
-                  : "Add customer"}
+                ? updateMutation.isPending ? "Saving…" : "Save changes"
+                : createMutation.isPending ? "Adding…" : "Add customer"}
             </button>
             {editingId && (
               <button type="button" onClick={cancelEdit} className={secondaryButtonClass}>

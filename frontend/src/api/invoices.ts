@@ -1,9 +1,5 @@
 import { apiClient } from "./client";
 
-// Numeric fields the backend sends back (Decimal-backed columns) may
-// serialize as either a JSON number or a string depending on pydantic's
-// encoder — treat them as opaque and always coerce with String()/Number()
-// at the point of use rather than assuming one representation.
 export type Decimalish = string | number;
 
 export interface InvoiceLineItemInput {
@@ -57,12 +53,24 @@ export interface InvoiceInput {
 export interface Invoice extends Omit<InvoiceInput, "discount_value" | "tcs" | "line_items"> {
   id: string;
   invoice_no: string;
+  status: "draft" | "saved" | "cancelled";
+  bill_to_name: string | null;
+  bill_to_address: string | null;
+  bill_to_gstin: string | null;
+  bill_to_pan: string | null;
+  bill_to_state: string | null;
+  bill_to_phone: string | null;
+  ship_to: string | null;
   discount_value: Decimalish;
   tcs: Decimalish;
   taxable_total: Decimalish;
+  discount_amount: Decimalish;
+  cgst_total: Decimalish;
+  sgst_total: Decimalish;
+  igst_total: Decimalish;
   tax_total: Decimalish;
+  round_off_amount: Decimalish;
   grand_total: Decimalish;
-  status: string;
   line_items: InvoiceLineItemRead[];
 }
 
@@ -70,12 +78,27 @@ export interface InvoiceListItem {
   id: string;
   invoice_no: string;
   invoice_date: string;
+  customer_name: string | null;
   grand_total: Decimalish;
   status: string;
 }
 
-export async function listInvoices(): Promise<InvoiceListItem[]> {
-  const { data } = await apiClient.get<InvoiceListItem[]>("/invoices");
+export interface InvoiceListResponse {
+  items: InvoiceListItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ListParams {
+  limit?: number;
+  offset?: number;
+  status?: string;
+  q?: string;
+}
+
+export async function listInvoices(params: ListParams = {}): Promise<InvoiceListResponse> {
+  const { data } = await apiClient.get<InvoiceListResponse>("/invoices", { params });
   return data;
 }
 
@@ -91,6 +114,11 @@ export async function getInvoice(id: string): Promise<Invoice> {
 
 export async function updateInvoice(id: string, body: InvoiceInput): Promise<Invoice> {
   const { data } = await apiClient.put<Invoice>(`/invoices/${id}`, body);
+  return data;
+}
+
+export async function finalizeInvoice(id: string): Promise<Invoice> {
+  const { data } = await apiClient.post<Invoice>(`/invoices/${id}/finalize`);
   return data;
 }
 

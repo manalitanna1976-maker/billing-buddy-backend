@@ -21,20 +21,21 @@ function ReadOnlyField({ label, value }: { label: string; value: string }) {
 export default function UserProfilePage() {
   const navigate = useNavigate();
   const email = useAuthStore((s) => s.email);
-  const setToken = useAuthStore((s) => s.setToken);
+  const setAuthed = useAuthStore((s) => s.setAuthed);
+  const setEmail = useAuthStore((s) => s.setEmail);
   const { data: business } = useQuery({ queryKey: ["business"], queryFn: getBusiness });
 
   async function handleLogout() {
     try {
-      // Revoke the token server-side (see backend app/token_revocation.py)
-      // so it can't be replayed if it leaked, not just forgotten locally.
+      // Clears the httpOnly session cookie and revokes the jti server-side
+      // (see backend app/token_revocation.py) so it can't be replayed.
       await logout();
     } catch {
-      // Best-effort: if the call fails (offline, token already expired,
-      // etc.), still clear local state so the user isn't stuck logged in
-      // on this device.
+      // Best-effort: if the call fails (offline, session already expired),
+      // still clear local state so the user isn't stuck on this device.
     } finally {
-      setToken(null);
+      setEmail(null);
+      setAuthed(false);
       navigate("/login");
     }
   }

@@ -22,8 +22,12 @@ export async function searchCustomers(q: string): Promise<Customer[]> {
   return data;
 }
 
-export async function listCustomers(): Promise<Customer[]> {
-  const { data } = await apiClient.get<Customer[]>("/customers", { params: { limit: 200 } });
+export async function listCustomers(
+  params: { limit?: number; offset?: number; q?: string } = {},
+): Promise<Customer[]> {
+  const { data } = await apiClient.get<Customer[]>("/customers", {
+    params: { limit: 200, ...params },
+  });
   return data;
 }
 
