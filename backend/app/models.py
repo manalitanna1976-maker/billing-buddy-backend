@@ -433,6 +433,10 @@ class Purchase(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     origin: Mapped[str] = mapped_column(String(12), default="ingestion")
     status: Mapped[str] = mapped_column(String(10), default="posted")
+    # invoice / credit_note / debit_note — classifies the ingested document.
+    # Credit / debit notes are stored as purchases rows with negative totals
+    # and negative line quantities. No CHECK constraint, matching origin/status.
+    doc_type: Mapped[str] = mapped_column(String(12), default="invoice")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
