@@ -303,3 +303,183 @@ class WhatsAppJob(Base):
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+# --------------------------------------------------------------------------- #
+# Purchasing / inventory shared domain
+#
+# These tables are written and read by ``billing-buddy-agent``'s ingestion
+# pipeline. That repo hand-writes matching SQLAlchemy models and runs
+# ``verify_schema()`` on startup — it refuses to start on drift. Keep these
+# classes, ``alembic/versions/0007_purchasing_inventory_domain.py`` and the
+# agent's ``docs/handoff/purchasing-tables.md`` in lockstep. Index and
+# unique-index names are load-bearing: the agent looks them up by name.
+#
+# The agent also owns ``agent.source_documents`` / ``agent.ingestion_runs`` in
+# a separate ``agent`` Postgres schema it creates itself. CRM must never
+# migrate, read, or FK into that schema.
+# --------------------------------------------------------------------------- #
+
+
+class Supplier(Base):
+    __tablename__ = "suppliers"
+    __table_args__ = (
+        Index(
+            "ux_suppliers_business_id_name_norm",
+            "business_id",
+            "name_norm",
+            unique=True,
+        ),
+        Index("ix_suppliers_business_id_gstin", "business_id", "gstin"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    business_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("businesses.id"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(200))
+    name_norm: Mapped[str] = mapped_column(String(200))
+    gstin: Mapped[str | None] = mapped_column(String(15), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state_code: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Product(Base):
+    __tablename__ = "products"
+    __table_args__ = (
+        Index(
+            "ux_products_business_id_name_norm",
+            "business_id",
+            "name_norm",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    business_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("businesses.id"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(200))
+    name_norm: Mapped[str] = mapped_column(String(200))
+    hsn_sac: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    uom: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    current_qty: Mapped[Decimal] = mapped_column(Numeric(12, 3), default=0)
+    reorder_level: Mapped[Decimal | None] = mapped_column(Numeric(12, 3), nullable=True)
+    default_purchase_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 2), nullable=True
+    )
+    auto_created: Mapped[bool] = mapped_column(Boolean, default=False)
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Purchase(Base):
+    __tablename__ = "purchases"
+    __table_args__ = (
+        Index(
+            "ux_purchases_business_supplier_invoice",
+            "business_id",
+            "supplier_id",
+            "invoice_no",
+            unique=True,
+            postgresql_where=text(
+                "invoice_no IS NOT NULL AND supplier_id IS NOT NULL"
+            ),
+        ),
+        # Purchase orders carry no invoice number; dedupe them on po_no instead.
+        Index(
+            "ux_purchases_business_supplier_po",
+            "business_id",
+            "supplier_id",
+            "po_no",
+            unique=True,
+            postgresql_where=text(
+                "invoice_no IS NULL AND po_no IS NOT NULL AND supplier_id IS NOT NULL"
+            ),
+        ),
+        Index("ix_purchases_business_id_created_at", "business_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    business_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("businesses.id"), index=True
+    )
+    supplier_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("suppliers.id"), nullable=True
+    )
+    # soft ref to agent.source_documents — NO cross-schema FK
+    source_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    invoice_no: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    invoice_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    po_no: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    taxable_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    tax_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    # Freight / packing / other add-on charges and rounding the document applies
+    # on top of the taxed line items; round_off may be negative. The agent
+    # writes these from the extraction (and mirrors the breakdown in
+    # agent.ingestion_runs.extracted_payload). Balance:
+    # taxable_total + tax_total + shipping_total + other_charges + round_off
+    # == grand_total.
+    shipping_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    other_charges: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    round_off: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    grand_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    currency: Mapped[str] = mapped_column(String(3), default="INR")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    origin: Mapped[str] = mapped_column(String(12), default="ingestion")
+    status: Mapped[str] = mapped_column(String(10), default="posted")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class PurchaseLineItem(Base):
+    __tablename__ = "purchase_line_items"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    purchase_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("purchases.id", ondelete="CASCADE"), index=True
+    )
+    sr_no: Mapped[int] = mapped_column(Integer)
+    product_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("products.id"), nullable=True
+    )
+    raw_description: Mapped[str] = mapped_column(String(500))
+    hsn_sac: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    qty: Mapped[Decimal] = mapped_column(Numeric(12, 3))
+    uom: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    discount: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    gst_rate: Mapped[Decimal] = mapped_column(Numeric(4, 2), default=0)
+    line_total: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class StockMovement(Base):
+    __tablename__ = "stock_movements"
+    __table_args__ = (
+        Index(
+            "ix_stock_movements_business_id_product_id_created_at",
+            "business_id",
+            "product_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    business_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("businesses.id"), index=True
+    )
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("products.id"), index=True
+    )
+    delta_qty: Mapped[Decimal] = mapped_column(Numeric(12, 3))
+    balance_after: Mapped[Decimal] = mapped_column(Numeric(12, 3))
+    reason: Mapped[str] = mapped_column(String(20))
+    ref_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    ref_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
