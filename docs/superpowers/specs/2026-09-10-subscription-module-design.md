@@ -132,7 +132,7 @@ write endpoints that create the counted rows.
 
 ## Data model
 
-### Migration `0008_billing.py` (additive; migrate-then-deploy safe)
+### Migration `0009_billing.py` (additive; migrate-then-deploy safe)
 
 Add to `businesses`:
 
@@ -373,7 +373,7 @@ a lock + "Upgrade" rather than hiding them (discovery — onboarding-cro: paywal
 
 ## Rollout
 
-- **Phase 1 — entitlements core.** Migration 0008 (4 columns + the
+- **Phase 1 — entitlements core.** Migration 0009 (4 columns + the
   `billing_payments` table — the table ships now even though nothing writes it
   until Phase 2 / the grant CLI), `plans.py`, `entitlements.py`,
   `require_feature`/`require_quota`, wire gates 1–4 and 6 + PDF footer, grant CLI,
@@ -417,7 +417,7 @@ for the audit trail. `--revoke` sets the business back to Free.
 - **WhatsApp worker gate:** Free business, authorized sender → exactly one
   upgrade text, second message within 24h → silent; Pro business → normal flow.
 - **Grant CLI:** grants, revokes, writes the audit payment row.
-- **Migration 0008:** down → up round-trip; backfill sets every existing
+- **Migration 0009:** down → up round-trip; backfill sets every existing
   business to Free.
 - **`billing_enabled=false`:** `/billing/checkout` → 404/503; gates still enforce.
 
@@ -426,7 +426,7 @@ Target: existing 265 backend tests stay green; new suite
 
 ## Deploy / ops notes
 
-- Migration 0008 is additive (new nullable columns with defaults + new table) →
+- Migration 0009 is additive (new nullable columns with defaults + new table) →
   **migrate before deploying** the new app code, no backward-compat window.
 - New required env when `billing_enabled=true`: `RAZORPAY_KEY_ID`,
   `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`. Add to the deploy runbook
