@@ -14,6 +14,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/business", label: "Business profile" },
   { to: "/bank-accounts", label: "Bank accounts" },
   { to: "/customers", label: "Customers" },
+  { to: "/inventory", label: "Inventory" },
   { to: "/", label: "Invoices" },
 ];
 

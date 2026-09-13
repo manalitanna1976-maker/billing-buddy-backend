@@ -17,6 +17,9 @@ from app.routers import (
     customers,
     invoices,
     meta,
+    products,
+    purchases,
+    suppliers,
     whatsapp,
 )
 
@@ -89,6 +92,9 @@ app.include_router(bank_accounts.router)
 app.include_router(customers.router)
 app.include_router(invoices.router)
 app.include_router(meta.router)
+app.include_router(products.router)
+app.include_router(suppliers.router)
+app.include_router(purchases.router)
 app.include_router(whatsapp.router)
 
 Path(get_settings().upload_dir).mkdir(exist_ok=True)

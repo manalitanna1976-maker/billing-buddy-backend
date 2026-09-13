@@ -7,6 +7,7 @@ import BankAccountsPage from "./pages/BankAccountsPage";
 import AuthPage from "./pages/AuthPage";
 import BusinessProfilePage from "./pages/BusinessProfilePage";
 import CustomersPage from "./pages/CustomersPage";
+import InventoryPage from "./pages/InventoryPage";
 import InvoiceFormPage from "./pages/InvoiceFormPage";
 import InvoiceListPage from "./pages/InvoiceListPage";
 import UserProfilePage from "./pages/UserProfilePage";
@@ -62,6 +63,7 @@ function Shell() {
       <Route path="/business" element={<ProtectedRoute><BusinessProfilePage /></ProtectedRoute>} />
       <Route path="/bank-accounts" element={<ProtectedRoute><BankAccountsPage /></ProtectedRoute>} />
       <Route path="/customers" element={<ProtectedRoute><CustomersPage /></ProtectedRoute>} />
+      <Route path="/inventory" element={<ProtectedRoute><InventoryPage /></ProtectedRoute>} />
       <Route path="/invoices/new" element={<ProtectedRoute><InvoiceFormPage /></ProtectedRoute>} />
       <Route path="/invoices/:id/edit" element={<ProtectedRoute><InvoiceFormPage /></ProtectedRoute>} />
       <Route path="/profile" element={<ProtectedRoute><UserProfilePage /></ProtectedRoute>} />

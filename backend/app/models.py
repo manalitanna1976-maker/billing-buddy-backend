@@ -439,6 +439,11 @@ class Purchase(Base):
     doc_type: Mapped[str] = mapped_column(String(12), default="invoice")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
+    line_items: Mapped[list["PurchaseLineItem"]] = relationship(
+        back_populates="purchase", cascade="all, delete-orphan", order_by="PurchaseLineItem.sr_no"
+    )
+    supplier: Mapped["Supplier | None"] = relationship()
+
 
 class PurchaseLineItem(Base):
     __tablename__ = "purchase_line_items"
@@ -460,6 +465,8 @@ class PurchaseLineItem(Base):
     gst_rate: Mapped[Decimal] = mapped_column(Numeric(4, 2), default=0)
     line_total: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    purchase: Mapped[Purchase] = relationship(back_populates="line_items")
 
 
 class StockMovement(Base):
