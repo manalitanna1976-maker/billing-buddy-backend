@@ -4,6 +4,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 
 import { getBusiness } from "../api/business";
 import { useAuthStore } from "../store/authStore";
+import { Theme, useThemeStore } from "../store/themeStore";
 
 interface NavItem {
   to: string;
@@ -27,9 +28,14 @@ function navLinkClass({ isActive }: { isActive: boolean }) {
   ].join(" ");
 }
 
+const THEME_LABEL: Record<Theme, string> = { light: "Light", dark: "Dark", system: "System" };
+const THEME_ICON: Record<Theme, string> = { light: "☀️", dark: "🌙", system: "🖥️" };
+
 export default function AppShell({ title, children }: { title: string; children: ReactNode }) {
   const navigate = useNavigate();
   const email = useAuthStore((s) => s.email);
+  const theme = useThemeStore((s) => s.theme);
+  const cycleTheme = useThemeStore((s) => s.cycleTheme);
   const { data: business } = useQuery({ queryKey: ["business"], queryFn: getBusiness });
 
   return (
@@ -57,6 +63,16 @@ export default function AppShell({ title, children }: { title: string; children:
             + New invoice
           </button>
         </nav>
+
+        <button
+          type="button"
+          onClick={cycleTheme}
+          title={`Theme: ${THEME_LABEL[theme]} (click to change)`}
+          className="mx-3 mb-2 flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm font-medium text-ink-muted hover:bg-primary/10 hover:text-ink"
+        >
+          <span>{THEME_ICON[theme]}</span>
+          <span>{THEME_LABEL[theme]}</span>
+        </button>
 
         <button
           type="button"
